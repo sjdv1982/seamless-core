@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 from .cell_errors import ProjectionError
@@ -21,6 +20,10 @@ class Cell:
 
     Navigation creates derived Cell builders. ``build()`` snapshots the current
     builder state into an immutable ``Expression`` container.
+
+    ``input_ref`` is a reference, never a value: ``None``, a ``Checksum``, an
+    ``Expression``, another Cell, or a workflow source.  A Cell gets a value
+    through ``set()``, which serializes it to a checksum.
     """
 
     __slots__ = (
@@ -45,6 +48,7 @@ class Cell:
         validator: Any = None,
         validator_language: str | None = None,
     ) -> None:
+        _check_input_ref(input_ref)
         self._workflow_backend = None
         self._input_ref = input_ref
         self._path = normalize_path(path)
@@ -90,6 +94,7 @@ class Cell:
     def _replace_input_ref(self, input_ref: Any) -> None:
         from .checksum_class import Checksum
 
+        _check_input_ref(input_ref)
         old = self._input_ref
         if isinstance(input_ref, Checksum):
             input_ref.incref_refholder()
@@ -238,10 +243,18 @@ class Cell:
         return self._workflow_backend.exception
 
     def set(self, value: Any) -> None:
+        """Set the input to ``value``.
+
+        A reference (see ``input_ref``) becomes the input as it is.  Any other
+        value is serialized now, with the current celltype, and its checksum
+        becomes the input.
+        """
         if self._workflow_backend is not None:
             self._workflow_backend.set(value)
             return None
         value = _capture_workflow_source(value)
+        if not _is_input_ref(value):
+            value = _serialize_value(value, self._celltype)
         self.input_ref = value
         return None
 
@@ -326,13 +339,13 @@ class Cell:
         return self._derive(validator=validator, validator_language=language)
 
     def build(self, input_ref: Any = _UNSET) -> Expression:
+        input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.build(input_ref)
         if input_ref is _UNSET:
-            input_ref = self._input_ref
-        input_ref = _capture_workflow_source(input_ref)
+            input_ref = _capture_workflow_source(self._input_ref)
         return Expression(
-            _snapshot_input_ref(input_ref),
+            input_ref,
             path=self._path,
             celltype=self._celltype,
             target_celltype=self._target_celltype,
@@ -346,16 +359,19 @@ class Cell:
         return self.build(input_ref)
 
     def compute(self, input_ref: Any = _UNSET, *, timeout=None):
+        input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.compute(input_ref, timeout=timeout)
         return self.build(input_ref).compute()
 
     def run(self, input_ref: Any = _UNSET):
+        input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.run(input_ref)
         return self.build(input_ref).run()
 
     async def compute_async(self, input_ref: Any = _UNSET, *, timeout=None):
+        input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return await self._workflow_backend.compute_async(input_ref, timeout=timeout)
         return await self.build(input_ref).compute_async()
@@ -548,10 +564,50 @@ def _bound_state_error(name: str):
     return BoundStateError(f"{name} is standalone-only for bound Cells")
 
 
-def _snapshot_input_ref(input_ref: Any) -> Any:
-    if isinstance(input_ref, (dict, list, set, bytearray)):
-        return copy.deepcopy(input_ref)
-    return input_ref
+def _is_input_ref(value: Any) -> bool:
+    """Whether ``value`` is a reference that a Cell may hold as its input.
+
+    Workflow sources (``_workflow_endpoint``) and transformation dependencies
+    (``_compute_dependency``) are duck-typed, like ``_capture_workflow_source``.
+    """
+
+    from .checksum_class import Checksum
+
+    if value is None or isinstance(value, (Checksum, Expression, Cell)):
+        return True
+    return any(
+        callable(getattr(value, hook, None))
+        for hook in ("_workflow_endpoint", "_compute_dependency")
+    )
+
+
+def _check_input_ref(value: Any) -> Any:
+    if _is_input_ref(value):
+        return value
+    hint = "use .set() to give a Cell a value"
+    if isinstance(value, (str, bytes)):
+        hint += ", or wrap a checksum in Checksum(...)"
+    raise TypeError(
+        "Cell input_ref must be None, a Checksum, an Expression, a Cell or a "
+        f"workflow source, not {type(value).__name__}; {hint}"
+    )
+
+
+def _input_override(input_ref: Any) -> Any:
+    """Capture and type-check an input passed to build/compute/run."""
+
+    if input_ref is _UNSET:
+        return input_ref
+    return _check_input_ref(_capture_workflow_source(input_ref))
+
+
+def _serialize_value(value: Any, celltype: str):
+    from .buffer_class import Buffer
+
+    buffer = Buffer(value, celltype)
+    # The tempref keeps the buffer resolvable until the Cell's refhold adopts it.
+    buffer.tempref()
+    return buffer.get_checksum()
 
 
 def _capture_workflow_source(value: Any) -> Any:

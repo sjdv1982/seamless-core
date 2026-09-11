@@ -18,7 +18,9 @@ from .conversion import (
     conversion_values,
 )
 from .hash_type import (
+    DType,
     HashType,
+    Rank,
     get_hash_type,
     get_hash_type_remote,
     register_hash_type_for_buffer,
@@ -223,7 +225,17 @@ def _validate_path_capability(
     source_celltype: str,
     path_steps: tuple[tuple[str, Any], ...],
 ) -> None:
+    """Reject a path step only where the root's HashType proves it impossible.
+
+    HashType describes the root value.  A slice preserves the structure it is
+    taken from, so the next step is checked against the same capabilities.  An
+    item step descends into a child whose bits are unknown, so checking stops,
+    except where the root's bits still type the child (type_bits_design §7.2):
+    a ``bytes`` item is an int, and a numeric numpy array admits as many
+    positional item steps as its rank.
+    """
     caps = hash_type.capabilities(source_celltype)
+    rank = int(hash_type.rank)
     for kind, payload in path_steps:
         needs = "SEQ"
         if kind == "item" and isinstance(payload, str):
@@ -238,6 +250,20 @@ def _validate_path_capability(
                     path_step=(kind, payload),
                 )
             )
+        if kind == "slice":
+            continue
+        if source_celltype == "bytes":
+            caps = set()
+        elif (
+            source_celltype == "binary"
+            and hash_type.dtype == DType.NUMERIC
+            and type(payload) is int
+            and rank < Rank.D3PLUS
+        ):
+            rank -= 1
+            caps = {"SEQ"} if rank > Rank.SCALAR else set()
+        else:
+            return
 
 
 def _possible_conversion_feasible(

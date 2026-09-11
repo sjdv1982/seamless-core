@@ -112,7 +112,7 @@ def test_single_cell_builds_independent_expressions_after_reassignment():
 
 
 def test_derived_cell_navigation_does_not_mutate_parent_cell():
-    parent = Cell("x", celltype="text")
+    parent = Cell(celltype="text")
     child = parent[0].as_celltype("str")
 
     assert parent.path == ""
