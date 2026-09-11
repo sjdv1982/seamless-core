@@ -218,6 +218,18 @@ class Cell:
         return self._workflow_backend.block_reason
 
     @property
+    def mount(self):
+        """Attach a whole Context cell to a file or directory."""
+        if self._workflow_backend is None:
+            raise AttributeError("mount is only available for bound workflow cells")
+        from seamless_workflow.attachments.api import MountHandle
+        return MountHandle(self._workflow_backend)
+
+    @mount.deleter
+    def mount(self):
+        self.mount.unmount()
+
+    @property
     def exception(self):
         """Return the exception associated with a failed workflow cell."""
 
