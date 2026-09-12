@@ -52,6 +52,21 @@ def test_expression_retired_name_never_projects(retired_name):
 def test_expression_types_are_keyword_only():
     with pytest.raises(TypeError):
         Expression(None, "", "plain", "str")
-    expression = Expression(None, "", celltype="plain", target_celltype="str")
-    assert expression.celltype == "plain"
+    expression = Expression(None, "", input_celltype="plain", target_celltype="str")
+    assert expression.input_celltype == "plain"
     assert expression.target_celltype == "str"
+
+
+@pytest.mark.parametrize("make", [Cell, lambda: Cell()["x"], lambda: Expression(None)])
+def test_input_rename_blocks_old_standalone_name(make):
+    with pytest.raises(AttributeError, match="celltype.*input_celltype"):
+        make().celltype
+
+
+def test_input_rename_preserves_bound_celltype():
+    backend = Backend()
+    backend.celltype = "plain"
+    cell = Cell._from_backend(backend)
+    assert cell.celltype == "plain"
+    cell.celltype = "str"
+    assert backend.celltype == "str"

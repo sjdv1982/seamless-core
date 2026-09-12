@@ -17,7 +17,7 @@ def _expression(value, celltype, path, target_celltype=None):
     return Expression(
         buffer.get_checksum(),
         path=path,
-        celltype=celltype,
+        input_celltype=celltype,
         target_celltype=target_celltype or celltype,
     )
 

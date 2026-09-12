@@ -55,7 +55,7 @@ def test_helper_expressions_construct_and_normalize(witness, case):
     assert isinstance(expression, Expression)
     assert expression.input_checksum == witness.source_checksum
     assert expression.path == normalize_path(case.path)
-    assert expression.celltype == case.celltype
+    assert expression.input_celltype == case.celltype
     assert expression.target_celltype == case.target_celltype
     assert expression.database_key == (
         witness.source_checksum.hex(),

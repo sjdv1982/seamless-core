@@ -62,7 +62,7 @@ def test_empty_path_conversion_uses_expression_cache():
     expression = Expression(
         source_checksum,
         path="",
-        celltype="text",
+        input_celltype="text",
         target_celltype="str",
     )
 
@@ -78,11 +78,11 @@ def test_empty_path_conversion_uses_expression_cache():
 def test_expression_identity_ignores_validator_fields():
     source_checksum = Buffer({"a": 1}, "plain").get_checksum()
 
-    first = Expression(source_checksum, path=".a", celltype="plain")
+    first = Expression(source_checksum, path=".a", input_celltype="plain")
     second = Expression(
         source_checksum,
         path=".a",
-        celltype="plain",
+        input_celltype="plain",
         validator=bytes.fromhex("00" * 32),
         validator_language="python",
     )

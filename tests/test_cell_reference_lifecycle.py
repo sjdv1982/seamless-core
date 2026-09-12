@@ -37,7 +37,7 @@ def test_derived_cell_has_independent_input_hold():
 def test_cell_does_not_hold_expression_result():
     source = Buffer({"x": "cell expression result"}, "plain")
     checksum = source.get_checksum()
-    cell = Cell(input_ref=checksum, celltype="plain").item("x").as_celltype("str")
+    cell = Cell(input_ref=checksum, input_celltype="plain").item("x").as_celltype("str")
     expression = cell.build()
     result = expression.compute()
     cache = __import__("seamless.caching.buffer_cache", fromlist=["get_buffer_cache"]).get_buffer_cache()

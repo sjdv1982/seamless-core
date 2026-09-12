@@ -48,7 +48,7 @@ def test_cell_input_survives_forced_expiry_and_unowned_control(monkeypatch):
     cache = get_buffer_cache()
     source = Buffer(_unique_bytes("cell"), "bytes")
     checksum = source.get_checksum()
-    cell = Cell(input_ref=checksum, celltype="bytes")
+    cell = Cell(input_ref=checksum, input_celltype="bytes")
     _assert_claims(cell, checksum, "input")
     del source
     gc.collect()
@@ -70,7 +70,7 @@ def test_cell_input_survives_forced_expiry_and_unowned_control(monkeypatch):
 def _expression_fixture(path: str = "value"):
     source = Buffer({"value": _unique_bytes("expression").decode()}, "plain")
     input_checksum = source.get_checksum()
-    expression = Expression(input_checksum, path, celltype="plain", target_celltype="text")
+    expression = Expression(input_checksum, path, input_celltype="plain", target_celltype="text")
     return source, expression
 
 
@@ -124,7 +124,7 @@ def test_repeated_public_expression_access_has_one_result_role(monkeypatch):
 def test_deepcell_top_level_checksum_is_the_only_claim(monkeypatch):
     source = Buffer({"token": uuid4().hex}, "deepcell")
     checksum = source.get_checksum()
-    cell = Cell(input_ref=checksum, celltype="deepcell")
+    cell = Cell(input_ref=checksum, input_celltype="deepcell")
     claims = collect_refholder_claims([cell]).get(checksum, [])
     assert [(holder, role) for holder, role in claims] == [(cell, "input")]
     evidence = force_expiry(checksum)
@@ -139,7 +139,7 @@ def test_deepcell_top_level_checksum_is_the_only_claim(monkeypatch):
 
 def test_equal_expressions_hold_same_result_independently(monkeypatch):
     source, first = _expression_fixture()
-    second = Expression(first.input_checksum, first.path, celltype=first.celltype, target_celltype=first.target_celltype)
+    second = Expression(first.input_checksum, first.path, input_celltype=first.input_celltype, target_celltype=first.target_celltype)
     result = first._evaluate_internal()
     assert second._publish_result(result) == result
     first._enable_result_holding()

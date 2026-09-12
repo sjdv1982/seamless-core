@@ -19,7 +19,7 @@ def _drop_buffer(checksum):
 def test_fingertip_recovers_missing_expression_result_from_reverse_cache():
     expression_mod.get_expression_cache().clear()
     source_checksum = Buffer({"a": "hello"}, "plain").get_checksum()
-    expression = Expression(source_checksum, "a", celltype="plain", target_celltype="str")
+    expression = Expression(source_checksum, "a", input_celltype="plain", target_celltype="str")
     result_checksum = expression.compute()
     _drop_buffer(result_checksum)
 
@@ -32,9 +32,9 @@ def test_fingertip_recovers_missing_expression_result_from_reverse_cache():
 def test_fingertip_recovers_chained_expression_results_recursively():
     expression_mod.get_expression_cache().clear()
     source_checksum = Buffer({"a": {"b": "leaf"}}, "plain").get_checksum()
-    first = Expression(source_checksum, "a", celltype="plain", target_celltype="plain")
+    first = Expression(source_checksum, "a", input_celltype="plain", target_celltype="plain")
     first_checksum = first.compute()
-    second = Expression(first_checksum, "b", celltype="plain", target_celltype="str")
+    second = Expression(first_checksum, "b", input_celltype="plain", target_celltype="str")
     second_checksum = second.compute()
     _drop_buffer(first_checksum)
     _drop_buffer(second_checksum)

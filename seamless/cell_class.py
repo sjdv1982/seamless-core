@@ -22,7 +22,7 @@ class Cell:
     Navigation creates derived Cell builders. ``build()`` snapshots the current
     builder state into an immutable ``Expression`` container.
 
-    The positional argument is ``celltype`` (default ``"mixed"``).
+    The positional argument is ``input_celltype`` (default ``"mixed"``).
     ``input_ref`` is keyword-only and is a reference, never a value: ``None``,
     a ``Checksum``, an ``Expression``, another Cell, or a workflow source. A Cell gets a value
     through ``set()``, which serializes it to a checksum.
@@ -32,7 +32,7 @@ class Cell:
         "_workflow_backend",
         "_input_ref",
         "_path",
-        "_celltype",
+        "_input_celltype",
         "_target_celltype",
         "_validator",
         "_validator_language",
@@ -42,7 +42,7 @@ class Cell:
 
     def __init__(
         self,
-        celltype: str = "mixed",
+        input_celltype: str = "mixed",
         *,
         input_ref: Any = None,
         path: str | None = None,
@@ -54,8 +54,8 @@ class Cell:
         self._workflow_backend = None
         self._input_ref = input_ref
         self._path = normalize_path(path)
-        self._celltype = celltype
-        self._target_celltype = celltype if target_celltype is None else target_celltype
+        self._input_celltype = input_celltype
+        self._target_celltype = input_celltype if target_celltype is None else target_celltype
         self._validator = validator
         self._validator_language = validator_language
         self._refholds_released = False
@@ -74,7 +74,7 @@ class Cell:
         object.__setattr__(self, "_workflow_backend", backend)
         object.__setattr__(self, "_input_ref", None)
         object.__setattr__(self, "_path", "")
-        object.__setattr__(self, "_celltype", "mixed")
+        object.__setattr__(self, "_input_celltype", "mixed")
         object.__setattr__(self, "_target_celltype", "mixed")
         object.__setattr__(self, "_validator", None)
         object.__setattr__(self, "_validator_language", None)
@@ -123,17 +123,30 @@ class Cell:
         return self._path
 
     @property
-    def celltype(self) -> str:
+    def celltype(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.celltype
-        return self._celltype
+        raise AttributeError("'celltype' has been retired; use input_celltype instead")
 
     @celltype.setter
-    def celltype(self, celltype: str) -> None:
+    def celltype(self, value):
         if self._workflow_backend is not None:
-            self._workflow_backend.celltype = celltype
+            self._workflow_backend.celltype = value
             return
-        self._celltype = celltype
+        raise AttributeError("'celltype' has been retired; use input_celltype instead")
+
+    @property
+    def input_celltype(self) -> str:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.celltype
+        return self._input_celltype
+
+    @input_celltype.setter
+    def input_celltype(self, input_celltype: str) -> None:
+        if self._workflow_backend is not None:
+            self._workflow_backend.celltype = input_celltype
+            return
+        self._input_celltype = input_celltype
 
     @property
     def target_celltype(self) -> str:
@@ -147,7 +160,7 @@ class Cell:
             self._workflow_backend.target_celltype = target_celltype
             return
         self._target_celltype = (
-            self._celltype if target_celltype is None else target_celltype
+            self._input_celltype if target_celltype is None else target_celltype
         )
 
     @property
@@ -248,7 +261,7 @@ class Cell:
         """Set the input to ``value``.
 
         A reference (see ``input_ref``) becomes the input as it is.  Any other
-        value is serialized now, with the current celltype, and its checksum
+        value is serialized now, with the current input_celltype, and its checksum
         becomes the input.
         """
         if self._workflow_backend is not None:
@@ -256,7 +269,7 @@ class Cell:
             return None
         value = _capture_workflow_source(value)
         if not _is_input_ref(value):
-            value = _serialize_value(value, self._celltype)
+            value = _serialize_value(value, self._input_celltype)
         self.input_ref = value
         return None
 
@@ -304,7 +317,7 @@ class Cell:
         clone = cls(
             input_ref=self._input_ref,
             path=self._path,
-            celltype=self._celltype,
+            input_celltype=self._input_celltype,
             target_celltype=self._target_celltype,
             validator=self._validator,
             validator_language=self._validator_language,
@@ -349,7 +362,7 @@ class Cell:
         return Expression(
             input_ref,
             path=self._path,
-            celltype=self._celltype,
+            input_celltype=self._input_celltype,
             target_celltype=self._target_celltype,
             validator=self._validator,
             validator_language=self._validator_language,
@@ -409,7 +422,8 @@ class Cell:
         return self.item(item)
 
     def __getattr__(self, name: str) -> "Cell":
-        check_retired_name(name)
+        if name != "celltype" or self._workflow_backend is None:
+            check_retired_name(name)
         if name.startswith("_"):
             raise AttributeError(name)
         # A class-defined API member is authoritative even when its getter raises
@@ -420,7 +434,8 @@ class Cell:
         return self.item(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        check_retired_name(name)
+        if name != "celltype" or self._workflow_backend is None:
+            check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__setattr__(self, name, value)
             return
@@ -429,7 +444,8 @@ class Cell:
         self._workflow_backend.assign(self.path_python, name, value)
 
     def __delattr__(self, name: str) -> None:
-        check_retired_name(name)
+        if name != "celltype" or self._workflow_backend is None:
+            check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__delattr__(self, name)
             return
@@ -484,7 +500,7 @@ class Cell:
         cls = type(self).__name__
         return (
             f"{cls}(input_ref={self.input_ref!r}, path={self.path_python!r}, "
-            f"celltype={self.celltype!r}, target_celltype={self.target_celltype!r}"
+            f"input_celltype={self.input_celltype!r}, target_celltype={self.target_celltype!r}"
             f"{self._repr_state()})"
         )
 
@@ -606,10 +622,10 @@ def _input_override(input_ref: Any) -> Any:
     return _check_input_ref(_capture_workflow_source(input_ref))
 
 
-def _serialize_value(value: Any, celltype: str):
+def _serialize_value(value: Any, input_celltype: str):
     from .buffer_class import Buffer
 
-    buffer = Buffer(value, celltype)
+    buffer = Buffer(value, input_celltype)
     # The tempref keeps the buffer resolvable until the Cell's refhold adopts it.
     buffer.tempref()
     return buffer.get_checksum()

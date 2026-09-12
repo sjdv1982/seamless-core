@@ -32,7 +32,7 @@ class ExpressionCase:
         return Expression(
             input_checksum,
             path=self.path,
-            celltype=self.celltype,
+            input_celltype=self.celltype,
             target_celltype=self.target_celltype,
         )
 

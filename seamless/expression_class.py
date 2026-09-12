@@ -69,7 +69,7 @@ class Expression:
     input_ref: Any
     path: str | None = ""
     _: KW_ONLY
-    celltype: str = "mixed"
+    input_celltype: str = "mixed"
     target_celltype: str | None = None
     validator: Checksum | str | bytes | None = None
     validator_language: str | None = None
@@ -89,7 +89,7 @@ class Expression:
     def __post_init__(self) -> None:
         path = normalize_path(self.path)
         target_celltype = (
-            self.celltype if self.target_celltype is None else self.target_celltype
+            self.input_celltype if self.target_celltype is None else self.target_celltype
         )
         validator = None if self.validator is None else Checksum(self.validator)
         object.__setattr__(self, "path", path)
@@ -147,7 +147,7 @@ class Expression:
         result = evaluate_expression(
             input_checksum,
             self.path,
-            self.celltype,
+            self.input_celltype,
             self.target_celltype,
             validator=self.validator,
             validator_language=self.validator_language,
@@ -178,7 +178,7 @@ class Expression:
             result = await evaluate_expression_async(
                 input_checksum,
                 self.path,
-                self.celltype,
+                self.input_celltype,
                 self.target_celltype,
                 validator=self.validator,
                 validator_language=self.validator_language,
@@ -187,7 +187,7 @@ class Expression:
             result = await evaluate_expression_remote(
                 input_checksum,
                 self.path,
-                self.celltype,
+                self.input_celltype,
                 self.target_celltype,
                 validator=self.validator,
                 validator_language=self.validator_language,
@@ -269,7 +269,7 @@ class Expression:
         return (
             _input_ref_key(self.input_ref),
             self.path,
-            self.celltype,
+            self.input_celltype,
             self.target_celltype,
         )
 
@@ -285,7 +285,7 @@ class Expression:
         return (
             input_checksum.hex(),
             self.path,
-            self.celltype,
+            self.input_celltype,
             self.target_celltype,
         )
 
@@ -332,7 +332,7 @@ class Expression:
         cls = type(self).__name__
         return (
             f"{cls}(input_ref={self.input_ref!r}, path={self.path!r}, "
-            f"celltype={self.celltype!r}, target_celltype={self.target_celltype!r})"
+            f"input_celltype={self.input_celltype!r}, target_celltype={self.target_celltype!r})"
         )
 
     async def compute_async(self, *, execution: str = "local") -> Checksum | None:
@@ -364,7 +364,7 @@ class Expression:
         return cancel_expression(
             input_checksum,
             self.path,
-            self.celltype,
+            self.input_celltype,
             self.target_celltype,
             member_id=id(self),
         )

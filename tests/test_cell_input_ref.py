@@ -31,7 +31,7 @@ def test_input_ref_property_rejects_values_and_keeps_old_hold(value):
 
 
 def test_with_input_and_build_override_reject_values():
-    cell = Cell(celltype="plain")
+    cell = Cell(input_celltype="plain")
     with pytest.raises(TypeError):
         cell.with_input({"a": 1})
     with pytest.raises(TypeError):
@@ -42,10 +42,10 @@ def test_with_input_and_build_override_reject_values():
 
 def test_checksum_input_forms():
     checksum = Buffer({"a": 1}, "plain").get_checksum()
-    by_keyword = Cell(input_ref=checksum, celltype="plain")
-    by_property = Cell(celltype="plain")
+    by_keyword = Cell(input_ref=checksum, input_celltype="plain")
+    by_property = Cell(input_celltype="plain")
     by_property.input_ref = checksum
-    by_set_checksum = Cell(celltype="plain")
+    by_set_checksum = Cell(input_celltype="plain")
     by_set_checksum.set_checksum(checksum.hex())
     for cell in (by_keyword, by_property, by_set_checksum):
         assert isinstance(cell.input_ref, Checksum)
@@ -58,7 +58,7 @@ def test_checksum_input_forms():
 
 def test_reference_inputs_are_accepted():
     checksum = Buffer(b"reference inputs").get_checksum()
-    expression = Expression(checksum, celltype="bytes")
+    expression = Expression(checksum, input_celltype="bytes")
     upstream = Cell(input_ref=checksum)
     assert Cell(input_ref=None).input_ref is None
     assert Cell(input_ref=expression).input_ref is expression
@@ -68,7 +68,7 @@ def test_reference_inputs_are_accepted():
 def test_set_serializes_value_with_current_celltype():
     value = {"a": 1, "b": [5, 6]}
     buffer = Buffer(value, "plain")
-    cell = Cell(celltype="plain")
+    cell = Cell(input_celltype="plain")
     cell.set(value)
     assert cell.input_ref == buffer.get_checksum()
     assert _count(cell.input_ref) == 1
@@ -79,7 +79,7 @@ def test_set_serializes_value_with_current_celltype():
 
 def test_set_hex_string_is_a_value_not_a_checksum():
     text = "ab" * 32
-    cell = Cell(celltype="text")
+    cell = Cell(input_celltype="text")
     cell.set(text)
     assert cell.input_ref != Checksum(text)
     assert cell.run() == text
@@ -87,13 +87,13 @@ def test_set_hex_string_is_a_value_not_a_checksum():
 
 def test_set_checksum_is_passed_through():
     checksum = Buffer(b"set checksum").get_checksum()
-    cell = Cell(celltype="bytes")
+    cell = Cell(input_celltype="bytes")
     cell.set(checksum)
     assert cell.input_ref is checksum
 
 
 def test_set_value_replaces_and_releases_previous_hold():
-    cell = Cell(celltype="int")
+    cell = Cell(input_celltype="int")
     cell.set(1)
     first = cell.input_ref
     cell.set(2)
@@ -105,7 +105,7 @@ def test_set_value_replaces_and_releases_previous_hold():
 
 def test_failed_set_leaves_input_unchanged():
     checksum = Buffer(b"failed set").get_checksum()
-    cell = Cell(input_ref=checksum, celltype="not-a-celltype")
+    cell = Cell(input_ref=checksum, input_celltype="not-a-celltype")
     with pytest.raises(TypeError):
         cell.set("value")
     assert cell.input_ref == checksum
@@ -116,7 +116,7 @@ def test_failed_set_leaves_input_unchanged():
 @pytest.mark.parametrize("celltype", ["mixed", "plain", "int", "float", "str", "text", "bytes"])
 def test_positional_argument_is_celltype(celltype):
     cell = Cell(celltype)
-    assert cell.celltype == celltype
+    assert cell.input_celltype == celltype
     assert cell.target_celltype == celltype
     assert cell.input_ref is None
 
@@ -126,7 +126,7 @@ def test_positional_celltype_with_keyword_reference():
     cell = Cell("int", input_ref=checksum)
     assert cell.run() == 42
     assert cell.input_ref == checksum
-    assert Cell().celltype == "mixed"
+    assert Cell().input_celltype == "mixed"
 
 
 def test_input_reference_cannot_be_second_positional_argument():
