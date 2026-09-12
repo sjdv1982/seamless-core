@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import Any
 
 from .checksum_class import Checksum
+from .retired_names import check_retired_name
 
 
 def normalize_path(path: str | None) -> str:
@@ -67,6 +68,7 @@ class Expression:
 
     input_ref: Any
     path: str | None = ""
+    _: KW_ONLY
     celltype: str = "mixed"
     target_celltype: str | None = None
     validator: Checksum | str | bytes | None = None
@@ -313,6 +315,7 @@ class Expression:
         return self.item(item)
 
     def __getattr__(self, name: str) -> "Expression":
+        check_retired_name(name)
         if name.startswith("_"):
             raise AttributeError(name)
         return self.item(name)

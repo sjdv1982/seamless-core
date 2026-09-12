@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .cell_errors import ProjectionError
+from .retired_names import check_retired_name
 from .expression_class import (
     Expression,
     append_item_path,
@@ -408,6 +409,7 @@ class Cell:
         return self.item(item)
 
     def __getattr__(self, name: str) -> "Cell":
+        check_retired_name(name)
         if name.startswith("_"):
             raise AttributeError(name)
         # A class-defined API member is authoritative even when its getter raises
@@ -418,6 +420,7 @@ class Cell:
         return self.item(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__setattr__(self, name, value)
             return
@@ -426,6 +429,7 @@ class Cell:
         self._workflow_backend.assign(self.path_python, name, value)
 
     def __delattr__(self, name: str) -> None:
+        check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__delattr__(self, name)
             return

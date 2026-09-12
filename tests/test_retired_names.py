@@ -1,0 +1,57 @@
+"""Removed API names cannot silently become paths, including on bound handles."""
+import pytest
+
+from seamless import Cell, Expression
+from seamless.retired_names import RETIRED_NAMES
+
+
+class Backend:
+    path = "root"
+    path_python = "root"
+
+    def assign(self, *args):
+        raise AssertionError("a retired API name must not write a value key")
+
+    def delete(self, *args):
+        raise AssertionError("a retired API name must not delete a value key")
+
+
+@pytest.fixture
+def retired_name(monkeypatch):
+    # Actual names remain live until their respective rename phases.
+    monkeypatch.setitem(RETIRED_NAMES, "retired_api", "replacement_api")
+    return "retired_api"
+
+
+@pytest.mark.parametrize("kind", ["standalone", "projection", "bound"])
+def test_cell_retired_name_never_projects(retired_name, kind):
+    cell = Cell()
+    if kind == "projection":
+        cell = cell["x"]
+    elif kind == "bound":
+        cell = Cell._from_backend(Backend())
+    for operation in (
+        lambda: getattr(cell, retired_name),
+        lambda: setattr(cell, retired_name, 1),
+        lambda: delattr(cell, retired_name),
+    ):
+        with pytest.raises(AttributeError, match="retired.*replacement_api"):
+            operation()
+
+
+def test_retired_name_remains_a_value_key(retired_name):
+    assert Cell()[retired_name].path == retired_name
+    assert Expression(None)[retired_name].path == retired_name
+
+
+def test_expression_retired_name_never_projects(retired_name):
+    with pytest.raises(AttributeError, match="retired.*replacement_api"):
+        getattr(Expression(None), retired_name)
+
+
+def test_expression_types_are_keyword_only():
+    with pytest.raises(TypeError):
+        Expression(None, "", "plain", "str")
+    expression = Expression(None, "", celltype="plain", target_celltype="str")
+    assert expression.celltype == "plain"
+    assert expression.target_celltype == "str"
