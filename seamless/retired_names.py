@@ -4,7 +4,7 @@ Entries are activated when the corresponding API is removed. Item navigation
 continues to permit value keys with these names.
 """
 
-RETIRED_NAMES: dict[str, str] = {"celltype": "input_celltype"}
+RETIRED_NAMES: dict[str, str] = {"target_celltype": "celltype"}
 
 
 def check_retired_name(name: str) -> None:

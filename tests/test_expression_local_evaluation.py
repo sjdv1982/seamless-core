@@ -63,7 +63,7 @@ def test_empty_path_conversion_uses_expression_cache():
         source_checksum,
         path="",
         input_celltype="text",
-        target_celltype="str",
+        celltype="str",
     )
 
     cache = get_expression_cache()

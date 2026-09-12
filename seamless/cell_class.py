@@ -33,7 +33,7 @@ class Cell:
         "_input_ref",
         "_path",
         "_input_celltype",
-        "_target_celltype",
+        "_celltype",
         "_validator",
         "_validator_language",
         "_refholds_released",
@@ -42,20 +42,22 @@ class Cell:
 
     def __init__(
         self,
-        input_celltype: str = "mixed",
+        input_celltype: str | None = None,
         *,
         input_ref: Any = None,
         path: str | None = None,
-        target_celltype: str | None = None,
+        celltype: str | None = None,
         validator: Any = None,
         validator_language: str | None = None,
     ) -> None:
+        if input_celltype is None:
+            input_celltype = celltype if celltype is not None else "mixed"
         _check_input_ref(input_ref)
         self._workflow_backend = None
         self._input_ref = input_ref
         self._path = normalize_path(path)
         self._input_celltype = input_celltype
-        self._target_celltype = input_celltype if target_celltype is None else target_celltype
+        self._celltype = input_celltype if celltype is None else celltype
         self._validator = validator
         self._validator_language = validator_language
         self._refholds_released = False
@@ -75,7 +77,7 @@ class Cell:
         object.__setattr__(self, "_input_ref", None)
         object.__setattr__(self, "_path", "")
         object.__setattr__(self, "_input_celltype", "mixed")
-        object.__setattr__(self, "_target_celltype", "mixed")
+        object.__setattr__(self, "_celltype", "mixed")
         object.__setattr__(self, "_validator", None)
         object.__setattr__(self, "_validator_language", None)
         object.__setattr__(self, "_refholds_released", True)
@@ -123,17 +125,17 @@ class Cell:
         return self._path
 
     @property
-    def celltype(self):
+    def target_celltype(self):
         if self._workflow_backend is not None:
-            return self._workflow_backend.celltype
-        raise AttributeError("'celltype' has been retired; use input_celltype instead")
+            return self._workflow_backend.target_celltype
+        raise AttributeError("'target_celltype' has been retired; use celltype instead")
 
-    @celltype.setter
-    def celltype(self, value):
+    @target_celltype.setter
+    def target_celltype(self, value):
         if self._workflow_backend is not None:
-            self._workflow_backend.celltype = value
+            self._workflow_backend.target_celltype = value
             return
-        raise AttributeError("'celltype' has been retired; use input_celltype instead")
+        raise AttributeError("'target_celltype' has been retired; use celltype instead")
 
     @property
     def input_celltype(self) -> str:
@@ -149,18 +151,18 @@ class Cell:
         self._input_celltype = input_celltype
 
     @property
-    def target_celltype(self) -> str:
+    def celltype(self) -> str:
         if self._workflow_backend is not None:
-            return self._workflow_backend.target_celltype
-        return self._target_celltype
+            return self._workflow_backend.celltype
+        return self._celltype
 
-    @target_celltype.setter
-    def target_celltype(self, target_celltype: str | None) -> None:
+    @celltype.setter
+    def celltype(self, celltype: str | None) -> None:
         if self._workflow_backend is not None:
-            self._workflow_backend.target_celltype = target_celltype
+            self._workflow_backend.celltype = celltype
             return
-        self._target_celltype = (
-            self._input_celltype if target_celltype is None else target_celltype
+        self._celltype = (
+            self._input_celltype if celltype is None else celltype
         )
 
     @property
@@ -318,7 +320,7 @@ class Cell:
             input_ref=self._input_ref,
             path=self._path,
             input_celltype=self._input_celltype,
-            target_celltype=self._target_celltype,
+            celltype=self._celltype,
             validator=self._validator,
             validator_language=self._validator_language,
         )
@@ -342,8 +344,8 @@ class Cell:
             path=append_slice_path(self.path_python, start, stop, step), _cls=cls
         )
 
-    def as_celltype(self, target_celltype: str) -> "Cell":
-        return self._derive(target_celltype=target_celltype)
+    def as_celltype(self, celltype: str) -> "Cell":
+        return self._derive(celltype=celltype)
 
     def with_input(self, input_ref: Any) -> "Cell":
         return self._derive(input_ref=input_ref)
@@ -363,7 +365,7 @@ class Cell:
             input_ref,
             path=self._path,
             input_celltype=self._input_celltype,
-            target_celltype=self._target_celltype,
+            celltype=self._celltype,
             validator=self._validator,
             validator_language=self._validator_language,
     )
@@ -422,7 +424,7 @@ class Cell:
         return self.item(item)
 
     def __getattr__(self, name: str) -> "Cell":
-        if name != "celltype" or self._workflow_backend is None:
+        if name != "target_celltype" or self._workflow_backend is None:
             check_retired_name(name)
         if name.startswith("_"):
             raise AttributeError(name)
@@ -434,7 +436,7 @@ class Cell:
         return self.item(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name != "celltype" or self._workflow_backend is None:
+        if name != "target_celltype" or self._workflow_backend is None:
             check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__setattr__(self, name, value)
@@ -444,7 +446,7 @@ class Cell:
         self._workflow_backend.assign(self.path_python, name, value)
 
     def __delattr__(self, name: str) -> None:
-        if name != "celltype" or self._workflow_backend is None:
+        if name != "target_celltype" or self._workflow_backend is None:
             check_retired_name(name)
         if name.startswith("_") or _class_attribute(type(self), name) is not None:
             object.__delattr__(self, name)
@@ -500,7 +502,7 @@ class Cell:
         cls = type(self).__name__
         return (
             f"{cls}(input_ref={self.input_ref!r}, path={self.path_python!r}, "
-            f"input_celltype={self.input_celltype!r}, target_celltype={self.target_celltype!r}"
+            f"input_celltype={self.input_celltype!r}, celltype={self.celltype!r}"
             f"{self._repr_state()})"
         )
 

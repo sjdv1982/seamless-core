@@ -33,7 +33,7 @@ class ExpressionCase:
             input_checksum,
             path=self.path,
             input_celltype=self.celltype,
-            target_celltype=self.target_celltype,
+            celltype=self.target_celltype,
         )
 
 

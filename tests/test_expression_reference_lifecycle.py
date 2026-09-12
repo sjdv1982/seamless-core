@@ -8,7 +8,7 @@ from seamless.caching.buffer_cache import get_buffer_cache
 def test_dormant_expression_holds_input_until_release():
     buffer = Buffer(b"dormant expression")
     checksum = buffer.get_checksum()
-    expression = Expression(checksum, "", input_celltype="text", target_celltype="text")
+    expression = Expression(checksum, "", input_celltype="text", celltype="text")
     assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 1
     expression._release_refholds()
     assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
@@ -17,7 +17,7 @@ def test_dormant_expression_holds_input_until_release():
 def test_public_expression_result_is_held_once():
     buffer = Buffer(b"public expression")
     checksum = buffer.get_checksum()
-    expression = Expression(checksum, "", input_celltype="text", target_celltype="text")
+    expression = Expression(checksum, "", input_celltype="text", celltype="text")
     result = expression.compute()
     cache = get_buffer_cache()
     assert cache.reference_snapshot()[result][0] == 2  # input and public result
@@ -31,7 +31,7 @@ def test_public_expression_result_is_held_once():
 def test_public_hold_after_internal_publication_is_acquired_once():
     buffer = Buffer(b"internal publication")
     checksum = buffer.get_checksum()
-    expression = Expression(checksum, "", input_celltype="text", target_celltype="text")
+    expression = Expression(checksum, "", input_celltype="text", celltype="text")
     result = __import__("seamless.checksum.expression", fromlist=["evaluate_expression"]).evaluate_expression(
         checksum, "", "text", "text"
     )
@@ -47,8 +47,8 @@ def test_public_hold_after_internal_publication_is_acquired_once():
 def test_equal_expressions_are_registered_and_released_independently():
     buffer = Buffer(b"equal expressions")
     checksum = buffer.get_checksum()
-    first = Expression(checksum, "", input_celltype="text", target_celltype="text")
-    second = Expression(checksum, "", input_celltype="text", target_celltype="text")
+    first = Expression(checksum, "", input_celltype="text", celltype="text")
+    second = Expression(checksum, "", input_celltype="text", celltype="text")
     assert first == second
     result = first.compute()
     second._publish_result(result)

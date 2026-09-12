@@ -90,11 +90,11 @@ def test_mutating_cell_after_build_does_not_affect_expression():
     expression = cell.build()
     cell.input_ref = second_checksum
     cell.path = ".b"
-    cell.target_celltype = "mixed"
+    cell.celltype = "mixed"
 
     assert expression.input_checksum == first_checksum
     assert expression.path == "a"
-    assert expression.target_celltype == "plain"
+    assert expression.celltype == "plain"
 
 
 def test_single_cell_builds_independent_expressions_after_reassignment():
@@ -116,9 +116,9 @@ def test_derived_cell_navigation_does_not_mutate_parent_cell():
     child = parent[0].as_celltype("str")
 
     assert parent.path == ""
-    assert parent.target_celltype == "text"
+    assert parent.celltype == "text"
     assert child.path == "[0]"
-    assert child.target_celltype == "str"
+    assert child.celltype == "str"
 
 
 def test_cell_call_remains_expression_builder():

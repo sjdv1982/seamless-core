@@ -23,7 +23,7 @@ class ExpressionKey:
     input_checksum: Checksum
     path: str
     input_celltype: str
-    target_celltype: str
+    celltype: str
 
 
 _expression_cache: dict[tuple[str, str, str, str], Checksum] = {}
@@ -62,7 +62,7 @@ def evaluate_expression(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
-    target_celltype: str,
+    celltype: str,
     *,
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
@@ -73,7 +73,7 @@ def evaluate_expression(
         # TODO validators: reject-only gate, excluded from expression identity.
         raise NotImplementedError("Expression validators are not implemented yet")
 
-    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, target_celltype)
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
@@ -90,7 +90,7 @@ def evaluate_expression(
         buffer=input_buffer,
         source_celltype=key.input_celltype,
         path_steps=steps,
-        target_celltype=key.target_celltype,
+        target_celltype=key.celltype,
     )
     return _evaluate_expression_after_validation(key, input_buffer, steps, cache_key)
 
@@ -99,7 +99,7 @@ async def evaluate_expression_async(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
-    target_celltype: str,
+    celltype: str,
     *,
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
@@ -108,7 +108,7 @@ async def evaluate_expression_async(
         # TODO validators: reject-only gate, excluded from expression identity.
         raise NotImplementedError("Expression validators are not implemented yet")
 
-    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, target_celltype)
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
@@ -125,7 +125,7 @@ async def evaluate_expression_async(
         buffer=input_buffer,
         source_celltype=key.input_celltype,
         path_steps=steps,
-        target_celltype=key.target_celltype,
+        target_celltype=key.celltype,
     )
     return _evaluate_expression_after_validation(key, input_buffer, steps, cache_key)
 
@@ -134,7 +134,7 @@ async def evaluate_expression_remote(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
-    target_celltype: str,
+    celltype: str,
     *,
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
@@ -146,7 +146,7 @@ async def evaluate_expression_remote(
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
         raise NotImplementedError("Expression validators are not implemented yet")
-    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, target_celltype)
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
@@ -163,7 +163,7 @@ async def evaluate_expression_remote(
             key.input_checksum,
             key.path,
             key.input_celltype,
-            key.target_celltype,
+            key.celltype,
         )
         if result is not None:
             _expression_cache[cache_key] = result
@@ -178,7 +178,7 @@ async def evaluate_expression_remote(
             key.input_checksum,
             key.path,
             key.input_celltype,
-            key.target_celltype,
+            key.celltype,
         )
     elif location == "remote":
         return await _run_active_remote_expression(
@@ -198,7 +198,7 @@ async def evaluate_expression_remote(
             key.input_checksum,
             key.path,
             key.input_celltype,
-            key.target_celltype,
+            key.celltype,
             result,
         )
     return result
@@ -251,7 +251,7 @@ async def _execute_remote_expression(
             key.input_checksum,
             key.path,
             key.input_celltype,
-            key.target_celltype,
+            key.celltype,
         )
         result = Checksum(result)
         _expression_cache[cache_key] = result
@@ -261,7 +261,7 @@ async def _execute_remote_expression(
                 key.input_checksum,
                 key.path,
                 key.input_celltype,
-                key.target_celltype,
+                key.celltype,
                 result,
             )
     except asyncio.CancelledError as exc:
@@ -307,11 +307,11 @@ def cancel_expression(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
-    target_celltype: str,
+    celltype: str,
     *,
     member_id: object | None = None,
 ) -> bool:
-    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, target_celltype)
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     return softcancel_expression(_cache_key(key), member_id)
 
 
@@ -321,7 +321,7 @@ def _evaluate_expression_after_validation(
     steps: tuple[tuple[str, Any], ...],
     cache_key: tuple[str, str, str, str],
 ) -> Checksum:
-    if key.path == "" and key.input_celltype == key.target_celltype:
+    if key.path == "" and key.input_celltype == key.celltype:
         # HashType validation above has already proved the source input_celltype is
         # structurally compatible. This is the intended skipped source
         # deserialization path for identity expressions.
@@ -342,7 +342,7 @@ def _evaluate_expression_after_validation(
     for step in steps:
         value = _apply_step(value, step)
 
-    result_buffer = _serialize_expression_result(value, key.target_celltype)
+    result_buffer = _serialize_expression_result(value, key.celltype)
     result_checksum = result_buffer.get_checksum()
     _expression_cache[cache_key] = result_checksum
     _expression_result_buffers[result_checksum] = result_buffer
@@ -366,10 +366,10 @@ def _publish_expression_result(
 
 def resolve_expression_value(
     result_checksum: Checksum | str | bytes,
-    target_celltype: str,
+    celltype: str,
 ) -> Any:
     buffer = _get_local_buffer(Checksum(result_checksum))
-    return _deserialize_for_expression(buffer, target_celltype)
+    return _deserialize_for_expression(buffer, celltype)
 
 
 def parse_path(path: str) -> tuple[tuple[str, Any], ...]:
@@ -413,7 +413,7 @@ def _cache_key(key: ExpressionKey) -> tuple[str, str, str, str]:
         key.input_checksum.hex(),
         key.path,
         key.input_celltype,
-        key.target_celltype,
+        key.celltype,
     )
 
 
@@ -444,13 +444,13 @@ def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:
     return buffer.get_value(input_celltype)
 
 
-def _serialize_expression_result(value: Any, target_celltype: str) -> Buffer:
-    if target_celltype == "binary" and isinstance(value, bytes):
+def _serialize_expression_result(value: Any, celltype: str) -> Buffer:
+    if celltype == "binary" and isinstance(value, bytes):
         import numpy as np
 
         return Buffer(np.array(value), "binary")
-    result = Buffer(value, target_celltype)
-    if target_celltype == "binary":
+    result = Buffer(value, celltype)
+    if celltype == "binary":
         from seamless.util.mixed import MAGIC_NUMPY
 
         if not result.content.startswith(MAGIC_NUMPY):

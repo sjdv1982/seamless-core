@@ -136,7 +136,7 @@ def test_auto_expression_uses_local_buffer_before_remote_dispatch(monkeypatch):
 def test_expression_cancel_fast_path_returns_false():
     get_expression_cache().clear()
     source_checksum = Buffer({"a": "local"}, "plain").get_checksum()
-    expression = Expression(source_checksum, "a", input_celltype="plain", target_celltype="str")
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
 
     assert expression.cancel() is False
 
@@ -162,8 +162,8 @@ def test_remote_expression_members_share_one_active_request(monkeypatch):
         return result_checksum
 
     jobserver_remote.run_expression = run_expression
-    expr1 = Expression(source_checksum, "a", input_celltype="plain", target_celltype="str")
-    expr2 = Expression(source_checksum, "a", input_celltype="plain", target_celltype="str")
+    expr1 = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    expr2 = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
 
     async def main():
         task1 = asyncio.create_task(expr1.compute_async(execution="remote"))
@@ -203,7 +203,7 @@ def test_remote_expression_last_member_cancel_stops_active_request(monkeypatch):
         await asyncio.Future()
 
     jobserver_remote.run_expression = run_expression
-    expression = Expression(source_checksum, "a", input_celltype="plain", target_celltype="str")
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
 
     async def main():
         task = asyncio.create_task(expression.compute_async(execution="remote"))

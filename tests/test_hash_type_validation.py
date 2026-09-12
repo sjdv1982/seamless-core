@@ -27,7 +27,7 @@ def test_async_buffer_deserialization_rejects_impossible_celltype_before_parse()
 
 def test_expression_path_capability_rejects_before_materialization():
     checksum = Buffer([1, 2, 3], "plain").get_checksum()
-    expression = Expression(checksum, "missing", input_celltype="plain", target_celltype="plain")
+    expression = Expression(checksum, "missing", input_celltype="plain", celltype="plain")
 
     with pytest.raises(HashTypeValidationError, match="requires MAP capability"):
         expression.compute()
@@ -35,7 +35,7 @@ def test_expression_path_capability_rejects_before_materialization():
 
 def test_identity_expression_keeps_validity_gate_for_overlong_numbers():
     checksum = Buffer(b"1" * 1001).get_checksum()
-    expression = Expression(checksum, "", input_celltype="float", target_celltype="float")
+    expression = Expression(checksum, "", input_celltype="float", celltype="float")
 
     with pytest.raises(HashTypeValidationError, match="Cannot deserialize"):
         expression.compute()

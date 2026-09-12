@@ -117,7 +117,7 @@ def test_failed_set_leaves_input_unchanged():
 def test_positional_argument_is_celltype(celltype):
     cell = Cell(celltype)
     assert cell.input_celltype == celltype
-    assert cell.target_celltype == celltype
+    assert cell.celltype == celltype
     assert cell.input_ref is None
 
 

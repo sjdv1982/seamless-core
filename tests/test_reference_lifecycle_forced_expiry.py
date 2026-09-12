@@ -70,7 +70,7 @@ def test_cell_input_survives_forced_expiry_and_unowned_control(monkeypatch):
 def _expression_fixture(path: str = "value"):
     source = Buffer({"value": _unique_bytes("expression").decode()}, "plain")
     input_checksum = source.get_checksum()
-    expression = Expression(input_checksum, path, input_celltype="plain", target_celltype="text")
+    expression = Expression(input_checksum, path, input_celltype="plain", celltype="text")
     return source, expression
 
 
@@ -139,7 +139,7 @@ def test_deepcell_top_level_checksum_is_the_only_claim(monkeypatch):
 
 def test_equal_expressions_hold_same_result_independently(monkeypatch):
     source, first = _expression_fixture()
-    second = Expression(first.input_checksum, first.path, input_celltype=first.input_celltype, target_celltype=first.target_celltype)
+    second = Expression(first.input_checksum, first.path, input_celltype=first.input_celltype, celltype=first.celltype)
     result = first._evaluate_internal()
     assert second._publish_result(result) == result
     first._enable_result_holding()

@@ -317,14 +317,14 @@ class Checksum:
             for key, result_checksum in get_expression_cache().items():
                 if Checksum(result_checksum) != self:
                     continue
-                input_hex, path, source_celltype, target_celltype = key
+                input_hex, path, source_celltype, celltype = key
                 seen_expressions.add(key)
                 expression_candidates.append(
                     {
                         "checksum": input_hex,
                         "path": path,
-                        "celltype": source_celltype,
-                        "target_celltype": target_celltype,
+                        "input_celltype": source_celltype,
+                        "celltype": celltype,
                     }
                 )
         except Exception:
@@ -342,8 +342,8 @@ class Checksum:
                     expr_key = (
                         Checksum(expression["checksum"]).hex(),
                         expression["path"],
+                        expression["input_celltype"],
                         expression["celltype"],
-                        expression["target_celltype"],
                     )
                 except Exception:
                     continue
@@ -361,8 +361,8 @@ class Checksum:
 
                 input_checksum = Checksum(expression["checksum"])
                 path = expression["path"]
-                source_celltype = expression["celltype"]
-                target_celltype = expression["target_celltype"]
+                source_celltype = expression["input_celltype"]
+                celltype = expression["celltype"]
                 try:
                     await input_checksum.fingertip()
                 except CacheMissError:
@@ -371,14 +371,14 @@ class Checksum:
                     input_checksum.hex(),
                     path,
                     source_celltype,
-                    target_celltype,
+                    celltype,
                 )
                 get_expression_cache().pop(cache_key, None)
                 result = await evaluate_expression_async(
                     input_checksum,
                     path,
                     source_celltype,
-                    target_celltype,
+                    celltype,
                 )
                 if Checksum(result) != self:
                     continue
@@ -389,7 +389,7 @@ class Checksum:
                         input_checksum,
                         path,
                         source_celltype,
-                        target_celltype,
+                        celltype,
                         self,
                     )
                 except Exception:

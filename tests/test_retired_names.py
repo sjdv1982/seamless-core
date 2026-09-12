@@ -52,15 +52,15 @@ def test_expression_retired_name_never_projects(retired_name):
 def test_expression_types_are_keyword_only():
     with pytest.raises(TypeError):
         Expression(None, "", "plain", "str")
-    expression = Expression(None, "", input_celltype="plain", target_celltype="str")
+    expression = Expression(None, "", input_celltype="plain", celltype="str")
     assert expression.input_celltype == "plain"
-    assert expression.target_celltype == "str"
+    assert expression.celltype == "str"
 
 
 @pytest.mark.parametrize("make", [Cell, lambda: Cell()["x"], lambda: Expression(None)])
-def test_input_rename_blocks_old_standalone_name(make):
-    with pytest.raises(AttributeError, match="celltype.*input_celltype"):
-        make().celltype
+def test_output_rename_blocks_old_standalone_name(make):
+    with pytest.raises(AttributeError, match="target_celltype.*celltype"):
+        make().target_celltype
 
 
 def test_input_rename_preserves_bound_celltype():
@@ -70,3 +70,10 @@ def test_input_rename_preserves_bound_celltype():
     assert cell.celltype == "plain"
     cell.celltype = "str"
     assert backend.celltype == "str"
+
+
+@pytest.mark.parametrize("make", [Cell, lambda **kw: Expression(None, **kw)])
+@pytest.mark.parametrize("kwargs,expected", [({}, "mixed"), ({"input_celltype": "str"}, "str"), ({"celltype": "text"}, "text")])
+def test_type_defaults_are_symmetric(make, kwargs, expected):
+    value = make(**kwargs)
+    assert value.input_celltype == value.celltype == expected

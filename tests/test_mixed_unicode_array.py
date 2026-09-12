@@ -44,6 +44,6 @@ def test_unicode_array_expression(path, target_celltype, expected):
         buffer.get_checksum(),
         path=path,
         input_celltype="binary",
-        target_celltype=target_celltype,
+        celltype=target_celltype,
     )
     np.testing.assert_array_equal(expression.run(), expected)

@@ -69,8 +69,8 @@ class Expression:
     input_ref: Any
     path: str | None = ""
     _: KW_ONLY
-    input_celltype: str = "mixed"
-    target_celltype: str | None = None
+    input_celltype: str | None = None
+    celltype: str | None = None
     validator: Checksum | str | bytes | None = None
     validator_language: str | None = None
     _result_checksum: Checksum | None = field(
@@ -87,13 +87,15 @@ class Expression:
     )
 
     def __post_init__(self) -> None:
+        if self.input_celltype is None:
+            object.__setattr__(self, "input_celltype", self.celltype if self.celltype is not None else "mixed")
         path = normalize_path(self.path)
-        target_celltype = (
-            self.input_celltype if self.target_celltype is None else self.target_celltype
+        celltype = (
+            self.input_celltype if self.celltype is None else self.celltype
         )
         validator = None if self.validator is None else Checksum(self.validator)
         object.__setattr__(self, "path", path)
-        object.__setattr__(self, "target_celltype", target_celltype)
+        object.__setattr__(self, "celltype", celltype)
         object.__setattr__(self, "validator", validator)
         from .reference_lifecycle import register_refholder
 
@@ -148,7 +150,7 @@ class Expression:
             input_checksum,
             self.path,
             self.input_celltype,
-            self.target_celltype,
+            self.celltype,
             validator=self.validator,
             validator_language=self.validator_language,
         )
@@ -179,7 +181,7 @@ class Expression:
                 input_checksum,
                 self.path,
                 self.input_celltype,
-                self.target_celltype,
+                self.celltype,
                 validator=self.validator,
                 validator_language=self.validator_language,
             )
@@ -188,7 +190,7 @@ class Expression:
                 input_checksum,
                 self.path,
                 self.input_celltype,
-                self.target_celltype,
+                self.celltype,
                 validator=self.validator,
                 validator_language=self.validator_language,
                 execution=execution,
@@ -270,7 +272,7 @@ class Expression:
             _input_ref_key(self.input_ref),
             self.path,
             self.input_celltype,
-            self.target_celltype,
+            self.celltype,
         )
 
     @property
@@ -286,7 +288,7 @@ class Expression:
             input_checksum.hex(),
             self.path,
             self.input_celltype,
-            self.target_celltype,
+            self.celltype,
         )
 
     def with_result(self, result: Checksum | str | bytes | None) -> "Expression":
@@ -306,8 +308,8 @@ class Expression:
     ) -> "Expression":
         return replace(self, path=append_slice_path(self.path, start, stop, step))
 
-    def as_celltype(self, target_celltype: str) -> "Expression":
-        return replace(self, target_celltype=target_celltype)
+    def as_celltype(self, celltype: str) -> "Expression":
+        return replace(self, celltype=celltype)
 
     def __getitem__(self, item: Any) -> "Expression":
         if isinstance(item, slice):
@@ -332,7 +334,7 @@ class Expression:
         cls = type(self).__name__
         return (
             f"{cls}(input_ref={self.input_ref!r}, path={self.path!r}, "
-            f"input_celltype={self.input_celltype!r}, target_celltype={self.target_celltype!r})"
+            f"input_celltype={self.input_celltype!r}, celltype={self.celltype!r})"
         )
 
     async def compute_async(self, *, execution: str = "local") -> Checksum | None:
@@ -349,7 +351,7 @@ class Expression:
         result = self.compute()
         if result is None:
             return None
-        return resolve_expression_value(result, self.target_celltype)
+        return resolve_expression_value(result, self.celltype)
 
     __call__ = run
 
@@ -365,7 +367,7 @@ class Expression:
             input_checksum,
             self.path,
             self.input_celltype,
-            self.target_celltype,
+            self.celltype,
             member_id=id(self),
         )
 
