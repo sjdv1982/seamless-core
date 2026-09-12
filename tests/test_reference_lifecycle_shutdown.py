@@ -25,7 +25,7 @@ def test_balanced_explicit_close_is_quiet_on_reference_logger():
 import logging
 from seamless import Cell, Checksum, close
 logging.basicConfig(level=logging.WARNING)
-cell = Cell(Checksum('00' * 32))
+cell = Cell(input_ref=Checksum('00' * 32))
 close()
 """
     )
@@ -70,7 +70,7 @@ def test_balanced_atexit_only_close_is_quiet_on_reference_logger():
             """
             import seamless
             from seamless import Cell, Checksum
-            Cell(Checksum('33' * 32))
+            Cell(input_ref=Checksum('33' * 32))
             seamless.ensure_open('shutdown test')
             """
         )
@@ -103,7 +103,7 @@ def test_live_claims_greater_than_count_are_reported_before_cleanup():
             from seamless import Cell, Checksum, close
             from seamless.caching.buffer_cache import get_buffer_cache
             checksum = Checksum('55' * 32)
-            cell = Cell(checksum)
+            cell = Cell(input_ref=checksum)
             checksum.decref_refholder()
             close()
             assert get_buffer_cache().reference_snapshot() == {}
@@ -228,7 +228,7 @@ def test_claim_collection_exception_does_not_hide_other_holders():
                 def _refheld_checksums(self):
                     raise RuntimeError('claim boom')
             checksum = Checksum('bb' * 32)
-            Cell(checksum)
+            Cell(input_ref=checksum)
             broken = Broken()
             register_refholder(broken)
             close()

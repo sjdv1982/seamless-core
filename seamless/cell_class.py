@@ -21,8 +21,9 @@ class Cell:
     Navigation creates derived Cell builders. ``build()`` snapshots the current
     builder state into an immutable ``Expression`` container.
 
-    ``input_ref`` is a reference, never a value: ``None``, a ``Checksum``, an
-    ``Expression``, another Cell, or a workflow source.  A Cell gets a value
+    The positional argument is ``celltype`` (default ``"mixed"``).
+    ``input_ref`` is keyword-only and is a reference, never a value: ``None``,
+    a ``Checksum``, an ``Expression``, another Cell, or a workflow source. A Cell gets a value
     through ``set()``, which serializes it to a checksum.
     """
 
@@ -40,10 +41,10 @@ class Cell:
 
     def __init__(
         self,
-        input_ref: Any = None,
-        *,
-        path: str | None = None,
         celltype: str = "mixed",
+        *,
+        input_ref: Any = None,
+        path: str | None = None,
         target_celltype: str | None = None,
         validator: Any = None,
         validator_language: str | None = None,
@@ -300,7 +301,7 @@ class Cell:
             result = self._workflow_backend.derive(**updates)
             return result if isinstance(result, Cell) else cls._from_backend(result)
         clone = cls(
-            self._input_ref,
+            input_ref=self._input_ref,
             path=self._path,
             celltype=self._celltype,
             target_celltype=self._target_celltype,

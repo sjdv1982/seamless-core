@@ -21,7 +21,7 @@ INVALID_EXPRESSION_CASES = tuple(
 
 
 def _cell_from_case(source_checksum, case):
-    cell = Cell(source_checksum, celltype=case.celltype)
+    cell = Cell(input_ref=source_checksum, celltype=case.celltype)
     for kind, payload in parse_path(case.path):
         if kind == "item":
             cell = cell[payload]
@@ -85,7 +85,7 @@ def test_cell_built_invalid_expressions_match_direct_failures(witness, case):
 def test_mutating_cell_after_build_does_not_affect_expression():
     first_checksum = Buffer({"a": 1}, "plain").get_checksum()
     second_checksum = Buffer({"a": 2}, "plain").get_checksum()
-    cell = Cell(first_checksum, celltype="plain").a
+    cell = Cell(input_ref=first_checksum, celltype="plain").a
 
     expression = cell.build()
     cell.input_ref = second_checksum
@@ -100,7 +100,7 @@ def test_mutating_cell_after_build_does_not_affect_expression():
 def test_single_cell_builds_independent_expressions_after_reassignment():
     first_checksum = Buffer({"a": 1}, "plain").get_checksum()
     second_checksum = Buffer({"a": 2}, "plain").get_checksum()
-    cell = Cell(first_checksum, celltype="plain").a
+    cell = Cell(input_ref=first_checksum, celltype="plain").a
 
     first = cell.build()
     cell.input_ref = second_checksum
@@ -123,7 +123,7 @@ def test_derived_cell_navigation_does_not_mutate_parent_cell():
 
 def test_cell_call_remains_expression_builder():
     checksum = Buffer({"a": 1}, "plain").get_checksum()
-    expression = Cell(checksum, celltype="plain").a()
+    expression = Cell(input_ref=checksum, celltype="plain").a()
 
     assert isinstance(expression, Expression)
     assert expression.path == "a"

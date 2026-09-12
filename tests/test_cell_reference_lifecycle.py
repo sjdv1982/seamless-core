@@ -10,7 +10,7 @@ def test_checksum_cell_acquires_replaces_and_releases_input():
     second = Buffer(b"cell lifecycle replacement").get_checksum()
     cache = __import__("seamless.caching.buffer_cache", fromlist=["get_buffer_cache"]).get_buffer_cache()
 
-    cell = Cell(first)
+    cell = Cell(input_ref=first)
     assert cache.reference_snapshot()[first][0] == 1
     cell.input_ref = second
     assert cache.reference_snapshot().get(first, (0, 0, False))[0] == 0
@@ -24,7 +24,7 @@ def test_checksum_cell_acquires_replaces_and_releases_input():
 def test_derived_cell_has_independent_input_hold():
     buffer = Buffer(b"derived cell")
     checksum = buffer.get_checksum()
-    cell = Cell(checksum)
+    cell = Cell(input_ref=checksum)
     derived = cell.item("field")
     cache = __import__("seamless.caching.buffer_cache", fromlist=["get_buffer_cache"]).get_buffer_cache()
     assert cache.reference_snapshot()[checksum][0] == 2
@@ -37,7 +37,7 @@ def test_derived_cell_has_independent_input_hold():
 def test_cell_does_not_hold_expression_result():
     source = Buffer({"x": "cell expression result"}, "plain")
     checksum = source.get_checksum()
-    cell = Cell(checksum, celltype="plain").item("x").as_celltype("str")
+    cell = Cell(input_ref=checksum, celltype="plain").item("x").as_celltype("str")
     expression = cell.build()
     result = expression.compute()
     cache = __import__("seamless.caching.buffer_cache", fromlist=["get_buffer_cache"]).get_buffer_cache()

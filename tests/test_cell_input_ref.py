@@ -16,15 +16,13 @@ VALUES = ["x", "ab" * 32, b"\0" * 32, 12, 1.5, True, {"a": 1}, [1], bytearray(b"
 @pytest.mark.parametrize("value", VALUES, ids=lambda v: type(v).__name__)
 def test_constructor_rejects_values(value):
     with pytest.raises(TypeError, match=r"\.set\(\)"):
-        Cell(value)
-    with pytest.raises(TypeError):
         Cell(input_ref=value)
 
 
 @pytest.mark.parametrize("value", VALUES, ids=lambda v: type(v).__name__)
 def test_input_ref_property_rejects_values_and_keeps_old_hold(value):
     checksum = Buffer(b"input_ref property").get_checksum()
-    cell = Cell(checksum)
+    cell = Cell(input_ref=checksum)
     with pytest.raises(TypeError):
         cell.input_ref = value
     assert cell.input_ref == checksum
@@ -61,10 +59,10 @@ def test_checksum_input_forms():
 def test_reference_inputs_are_accepted():
     checksum = Buffer(b"reference inputs").get_checksum()
     expression = Expression(checksum, celltype="bytes")
-    upstream = Cell(checksum)
-    assert Cell(None).input_ref is None
-    assert Cell(expression).input_ref is expression
-    assert Cell(upstream).input_ref is upstream
+    upstream = Cell(input_ref=checksum)
+    assert Cell(input_ref=None).input_ref is None
+    assert Cell(input_ref=expression).input_ref is expression
+    assert Cell(input_ref=upstream).input_ref is upstream
 
 
 def test_set_serializes_value_with_current_celltype():
@@ -107,9 +105,30 @@ def test_set_value_replaces_and_releases_previous_hold():
 
 def test_failed_set_leaves_input_unchanged():
     checksum = Buffer(b"failed set").get_checksum()
-    cell = Cell(checksum, celltype="not-a-celltype")
+    cell = Cell(input_ref=checksum, celltype="not-a-celltype")
     with pytest.raises(TypeError):
         cell.set("value")
     assert cell.input_ref == checksum
     assert _count(checksum) == 1
     cell._release_refholds()
+
+
+@pytest.mark.parametrize("celltype", ["mixed", "plain", "int", "float", "str", "text", "bytes"])
+def test_positional_argument_is_celltype(celltype):
+    cell = Cell(celltype)
+    assert cell.celltype == celltype
+    assert cell.target_celltype == celltype
+    assert cell.input_ref is None
+
+
+def test_positional_celltype_with_keyword_reference():
+    checksum = Buffer(42, "int").get_checksum()
+    cell = Cell("int", input_ref=checksum)
+    assert cell.run() == 42
+    assert cell.input_ref == checksum
+    assert Cell().celltype == "mixed"
+
+
+def test_input_reference_cannot_be_second_positional_argument():
+    with pytest.raises(TypeError):
+        Cell("int", Buffer(42, "int").get_checksum())
