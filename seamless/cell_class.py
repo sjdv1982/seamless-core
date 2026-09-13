@@ -16,82 +16,30 @@ from .expression_class import (
 _UNSET = object()
 
 
-class Cell:
-    """Mutable structural expression builder.
+class CellBase:
+    """Shared value, type, evaluation, and ownership API for Cells and Pins.
 
-    Navigation creates derived Cell builders. ``build()`` snapshots the current
-    builder state into an immutable ``Expression`` container.
-
-    The positional argument is the produced ``celltype``. Give a typed input
-    with ``source=`` or a checksum with ``checksum=``; use ``set()`` for values.
-    The input type is read-only and follows the source or the stored checksum's
-    declaration. Retyping changes the output conversion, not the stored input.
+    Structural navigation and workflow source protocols belong to Cell only.
+    Pin backends supply Transformer-owned state through the same value API.
     """
 
-    __slots__ = (
-        "_workflow_backend",
-        "_standalone_input_ref",
-        "_path",
-        "_input_celltype",
-        "_celltype",
-        "_validator",
-        "_validator_language",
-        "_standalone_exception",
-        "_refholds_released",
-        "__weakref__",
-    )
+    __slots__ = ("_workflow_backend", "_standalone_input_ref", "_input_celltype",
+                 "_celltype", "_standalone_exception", "_refholds_released", "__weakref__")
 
-    def __init__(
-        self, celltype: str | None = None, *, checksum: Any = _UNSET,
-        source: Any = _UNSET, input_celltype: str | None = None,
-        path: str | None = None, validator: Any = None,
-        validator_language: str | None = None,
-    ) -> None:
-        from .checksum_class import Checksum
-        from .buffer_class import Buffer
-        from .reference_lifecycle import register_refholder
+    def build(self):
+        return self._workflow_backend.build(_UNSET)
 
-        if checksum is not _UNSET and source is not _UNSET:
-            raise TypeError("checksum and source are mutually exclusive inputs")
-        if source is not _UNSET:
-            if source is not None and (isinstance(source, Checksum) or not _is_input_ref(source)):
-                raise TypeError("source must be a typed reference; use checksum= for a checksum")
-            ref = source
-        else:
-            ref = None if checksum is _UNSET or checksum is None else Checksum(checksum)
-        declared = _typed_input_celltype(ref)
-        if declared is not None and input_celltype is not None and input_celltype != declared:
-            raise ValueError("input_celltype disagrees with the typed source's celltype")
-        celltype = celltype if celltype is not None else declared or "mixed"
-        Buffer._map_celltype(celltype)
-        self._workflow_backend = None
-        self._input_ref = ref
-        self._path = normalize_path(path)
-        self._celltype = celltype
-        self._input_celltype = None if ref is None else declared or input_celltype or celltype
-        self._validator = validator
-        self._validator_language = validator_language
-        self._standalone_exception = None
-        self._refholds_released = False
-        register_refholder(self)
-        if isinstance(ref, Checksum):
-            ref.incref_refholder()
+    def __getattr__(self, name):
+        check_retired_name(name)
+        raise AttributeError(name)
 
-    @classmethod
-    def _from_backend(cls, backend) -> "Cell":
-        """Create a canonical Cell whose state is entirely backend-owned."""
+    def __setattr__(self, name, value):
+        check_retired_name(name)
+        object.__setattr__(self, name, value)
 
-        self = cls.__new__(cls)
-        object.__setattr__(self, "_workflow_backend", backend)
-        object.__setattr__(self, "_input_ref", None)
-        object.__setattr__(self, "_path", "")
-        object.__setattr__(self, "_input_celltype", "mixed")
-        object.__setattr__(self, "_celltype", "mixed")
-        object.__setattr__(self, "_validator", None)
-        object.__setattr__(self, "_validator_language", None)
-        object.__setattr__(self, "_standalone_exception", None)
-        object.__setattr__(self, "_refholds_released", True)
-        return self
+    def __repr__(self):
+        return (f"{type(self).__name__}(input_celltype={self.input_celltype!r}, "
+                f"celltype={self.celltype!r}{self._repr_state()})")
 
     @property
     def _input_ref(self):
@@ -126,24 +74,6 @@ class Cell:
             old.decref_refholder()
 
     @property
-    def path(self) -> str:
-        if self._workflow_backend is not None:
-            return self._workflow_backend.path
-        return self._path
-
-    @path.setter
-    def path(self, path: str | None) -> None:
-        if self._workflow_backend is not None:
-            raise _bound_state_error("path")
-        self._path = normalize_path(path)
-
-    @property
-    def path_python(self) -> str:
-        if self._workflow_backend is not None:
-            return self._workflow_backend.path_python
-        return self._path
-
-    @property
     def input_celltype(self) -> str | None:
         if self._workflow_backend is not None:
             return self._workflow_backend.input_celltype
@@ -166,32 +96,6 @@ class Cell:
         Buffer._map_celltype(celltype)
         self._celltype = celltype
         self._standalone_exception = None
-
-    @property
-    def validator(self) -> Any:
-        if self._workflow_backend is not None:
-            return self._workflow_backend.validator
-        return self._validator
-
-    @validator.setter
-    def validator(self, validator: Any) -> None:
-        if self._workflow_backend is not None:
-            self._workflow_backend.validator = validator
-            return
-        self._validator = validator
-
-    @property
-    def validator_language(self) -> str | None:
-        if self._workflow_backend is not None:
-            return self._workflow_backend.validator_language
-        return self._validator_language
-
-    @validator_language.setter
-    def validator_language(self, validator_language: str | None) -> None:
-        if self._workflow_backend is not None:
-            self._workflow_backend.validator_language = validator_language
-            return
-        self._validator_language = validator_language
 
     @property
     def checksum(self):
@@ -260,26 +164,6 @@ class Cell:
         if self._standalone_exception is not None:
             return "failed"
         return "blocked"
-
-    @property
-    def block_reason(self) -> str | None:
-        """Why a ``blocked`` cell is blocked: ``blocked-by-unwired``, ``blocked-by-error``, or None."""
-
-        if self._workflow_backend is None:
-            raise AttributeError("block_reason is only available for bound workflow cells")
-        return self._workflow_backend.block_reason
-
-    @property
-    def mount(self):
-        """Attach a whole Context cell to a file or directory."""
-        if self._workflow_backend is None:
-            raise AttributeError("mount is only available for bound workflow cells")
-        from seamless_workflow.attachments.api import MountHandle
-        return MountHandle(self._workflow_backend)
-
-    @mount.deleter
-    def mount(self):
-        self.mount.unmount()
 
     @property
     def exception(self):
@@ -352,6 +236,199 @@ class Cell:
         except Exception:
             pass
 
+    def compute(self, input_ref: Any = _UNSET, *, timeout=None):
+        input_ref = _input_override(input_ref)
+        if self._workflow_backend is not None:
+            return self._workflow_backend.compute(input_ref, timeout=timeout)
+        return self.build(input_ref).compute()
+
+    def run(self, input_ref: Any = _UNSET):
+        input_ref = _input_override(input_ref)
+        if self._workflow_backend is not None:
+            return self._workflow_backend.run(input_ref)
+        return self.build(input_ref).run()
+
+    async def compute_async(self, input_ref: Any = _UNSET, *, timeout=None):
+        input_ref = _input_override(input_ref)
+        if self._workflow_backend is not None:
+            return await self._workflow_backend.compute_async(input_ref, timeout=timeout)
+        return await self.build(input_ref).compute_async()
+
+    async def computation(self, timeout=None):
+        return await self.compute_async(timeout=timeout)
+
+    def _repr_state(self) -> str:
+        """``state=...`` for a bound cell, empty otherwise.  Never raises.
+
+        A repr is what a REPL shows, and it is now the only place a bound cell
+        summarises itself: the ``status`` string used to do that and is gone.  A stale
+        or standalone handle simply omits the field rather than failing to print.
+        """
+
+        try:
+            if self._workflow_backend is None:
+                return ""
+            return f", state={self._workflow_backend.state!r}"
+        except Exception:
+            return ""
+
+
+
+class Cell(CellBase):
+    """Mutable structural expression builder.
+
+    Navigation creates derived Cell builders. ``build()`` snapshots the current
+    builder state into an immutable ``Expression`` container.
+
+    The positional argument is the produced ``celltype``. Give a typed input
+    with ``source=`` or a checksum with ``checksum=``; use ``set()`` for values.
+    The input type is read-only and follows the source or the stored checksum's
+    declaration. Retyping changes the output conversion, not the stored input.
+    """
+
+    __slots__ = ("_path", "_validator", "_validator_language")
+
+    def __init__(
+        self, celltype: str | None = None, *, checksum: Any = _UNSET,
+        source: Any = _UNSET, input_celltype: str | None = None,
+        path: str | None = None, validator: Any = None,
+        validator_language: str | None = None,
+    ) -> None:
+        from .checksum_class import Checksum
+        from .buffer_class import Buffer
+        from .reference_lifecycle import register_refholder
+
+        if checksum is not _UNSET and source is not _UNSET:
+            raise TypeError("checksum and source are mutually exclusive inputs")
+        if source is not _UNSET:
+            if source is not None and (isinstance(source, Checksum) or not _is_input_ref(source)):
+                raise TypeError("source must be a typed reference; use checksum= for a checksum")
+            ref = source
+        else:
+            ref = None if checksum is _UNSET or checksum is None else Checksum(checksum)
+        declared = _typed_input_celltype(ref)
+        if declared is not None and input_celltype is not None and input_celltype != declared:
+            raise ValueError("input_celltype disagrees with the typed source's celltype")
+        celltype = celltype if celltype is not None else declared or "mixed"
+        Buffer._map_celltype(celltype)
+        self._workflow_backend = None
+        self._input_ref = ref
+        self._path = normalize_path(path)
+        self._celltype = celltype
+        self._input_celltype = None if ref is None else declared or input_celltype or celltype
+        self._validator = validator
+        self._validator_language = validator_language
+        self._standalone_exception = None
+        self._refholds_released = False
+        register_refholder(self)
+        if isinstance(ref, Checksum):
+            ref.incref_refholder()
+
+    @classmethod
+    def _from_backend(cls, backend) -> "Cell":
+        """Create a canonical Cell whose state is entirely backend-owned."""
+
+        self = cls.__new__(cls)
+        object.__setattr__(self, "_workflow_backend", backend)
+        object.__setattr__(self, "_input_ref", None)
+        object.__setattr__(self, "_path", "")
+        object.__setattr__(self, "_input_celltype", "mixed")
+        object.__setattr__(self, "_celltype", "mixed")
+        object.__setattr__(self, "_validator", None)
+        object.__setattr__(self, "_validator_language", None)
+        object.__setattr__(self, "_standalone_exception", None)
+        object.__setattr__(self, "_refholds_released", True)
+        return self
+
+
+
+
+
+    @property
+    def path(self) -> str:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.path
+        return self._path
+
+    @path.setter
+    def path(self, path: str | None) -> None:
+        if self._workflow_backend is not None:
+            raise _bound_state_error("path")
+        self._path = normalize_path(path)
+
+    @property
+    def path_python(self) -> str:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.path_python
+        return self._path
+
+
+
+
+    @property
+    def validator(self) -> Any:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.validator
+        return self._validator
+
+    @validator.setter
+    def validator(self, validator: Any) -> None:
+        if self._workflow_backend is not None:
+            self._workflow_backend.validator = validator
+            return
+        self._validator = validator
+
+    @property
+    def validator_language(self) -> str | None:
+        if self._workflow_backend is not None:
+            return self._workflow_backend.validator_language
+        return self._validator_language
+
+    @validator_language.setter
+    def validator_language(self, validator_language: str | None) -> None:
+        if self._workflow_backend is not None:
+            self._workflow_backend.validator_language = validator_language
+            return
+        self._validator_language = validator_language
+
+
+
+
+
+
+
+
+    @property
+    def block_reason(self) -> str | None:
+        """Why a ``blocked`` cell is blocked: ``blocked-by-unwired``, ``blocked-by-error``, or None."""
+
+        if self._workflow_backend is None:
+            raise AttributeError("block_reason is only available for bound workflow cells")
+        return self._workflow_backend.block_reason
+
+    @property
+    def mount(self):
+        """Attach a whole Context cell to a file or directory."""
+        if self._workflow_backend is None:
+            raise AttributeError("mount is only available for bound workflow cells")
+        from seamless_workflow.attachments.api import MountHandle
+        return MountHandle(self._workflow_backend)
+
+    @mount.deleter
+    def mount(self):
+        self.mount.unmount()
+
+
+
+
+
+
+
+
+
+
+
+
     def _derive(self, **updates: Any) -> "Cell":
         cls = updates.pop("_cls", None) or type(self)
         if self._workflow_backend is not None:
@@ -418,26 +495,9 @@ class Cell:
     def __call__(self, input_ref: Any = _UNSET) -> Expression:
         return self.build(input_ref)
 
-    def compute(self, input_ref: Any = _UNSET, *, timeout=None):
-        input_ref = _input_override(input_ref)
-        if self._workflow_backend is not None:
-            return self._workflow_backend.compute(input_ref, timeout=timeout)
-        return self.build(input_ref).compute()
 
-    def run(self, input_ref: Any = _UNSET):
-        input_ref = _input_override(input_ref)
-        if self._workflow_backend is not None:
-            return self._workflow_backend.run(input_ref)
-        return self.build(input_ref).run()
 
-    async def compute_async(self, input_ref: Any = _UNSET, *, timeout=None):
-        input_ref = _input_override(input_ref)
-        if self._workflow_backend is not None:
-            return await self._workflow_backend.compute_async(input_ref, timeout=timeout)
-        return await self.build(input_ref).compute_async()
 
-    async def computation(self, timeout=None):
-        return await self.compute_async(timeout=timeout)
 
     def prune(self):
         if self._workflow_backend is None:
@@ -523,20 +583,6 @@ class Cell:
         self._workflow_backend.augmented(self.path_python, operation, value)
         return self
 
-    def _repr_state(self) -> str:
-        """``state=...`` for a bound cell, empty otherwise.  Never raises.
-
-        A repr is what a REPL shows, and it is now the only place a bound cell
-        summarises itself: the ``status`` string used to do that and is gone.  A stale
-        or standalone handle simply omits the field rather than failing to print.
-        """
-
-        try:
-            if self._workflow_backend is None:
-                return ""
-            return f", state={self._workflow_backend.state!r}"
-        except Exception:
-            return ""
 
     def __repr__(self) -> str:
         cls = type(self).__name__
@@ -636,6 +682,8 @@ def _is_input_ref(value: Any) -> bool:
 
     from .checksum_class import Checksum
 
+    if isinstance(value, CellBase) and not isinstance(value, Cell):
+        raise TypeError("a Pin can't be a source; connect pin.source instead")
     if value is None or isinstance(value, (Checksum, Expression, Cell)):
         return True
     return any(
@@ -682,7 +730,7 @@ def _capture_workflow_source(value: Any) -> Any:
     return value
 
 
-__all__ = ["Cell"]
+__all__ = ["Cell", "CellBase"]
 
 
 def _typed_input_celltype(value):
