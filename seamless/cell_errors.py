@@ -19,4 +19,12 @@ class ProjectionError(TypeError, AttributeError):
     """
 
 
-__all__ = ["BoundStateError", "ProjectionError"]
+__all__ = ["BoundStateError", "ProjectionError", "WorkflowError", "AuthorityError"]
+
+
+class WorkflowError(Exception):
+    """Base error for workflow ownership and configuration."""
+
+
+class AuthorityError(WorkflowError):
+    """A local write would be overwritten by an upstream source."""

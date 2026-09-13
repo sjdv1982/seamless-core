@@ -321,6 +321,13 @@ def _evaluate_expression_after_validation(
     steps: tuple[tuple[str, Any], ...],
     cache_key: tuple[str, str, str, str],
 ) -> Checksum:
+    from .null import is_null, NULL_BUFFER
+    if not steps and (is_null(key.input_checksum) or (key.celltype == "bytes" and input_buffer.content == b"")):
+        result_buffer = Buffer(NULL_BUFFER)
+        result = result_buffer.get_checksum()
+        _expression_cache[cache_key] = result
+        _publish_expression_result(result, buffer=result_buffer)
+        return result
     if key.path == "" and key.input_celltype == key.celltype:
         # HashType validation above has already proved the source input_celltype is
         # structurally compatible. This is the intended skipped source
@@ -421,6 +428,10 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     from seamless.caching.buffer_cache import get_buffer_cache
     from seamless.checksum.cached_calculate_checksum import checksum_cache
 
+    from .calculate_checksum import TRIVIAL_CHECKSUMS
+    trivial = TRIVIAL_CHECKSUMS.get(checksum.hex())
+    if trivial is not None:
+        return Buffer(trivial)
     buffer = get_buffer_cache().get(checksum)
     if buffer is not None:
         return buffer
@@ -440,7 +451,8 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
 
 def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:
     if input_celltype == "bytes":
-        return buffer.content
+        from .null import NULL_BUFFER
+        return b"" if buffer.content == NULL_BUFFER else buffer.content
     return buffer.get_value(input_celltype)
 
 

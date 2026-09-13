@@ -197,6 +197,9 @@ def conversion_feasible(
 ) -> bool | None:
     """Return False only when HashType proves conversion impossible."""
 
+    from .null import is_null
+    if is_null(checksum):
+        return True
     hash_type = hash_type if isinstance(hash_type, HashType) else HashType.unpack(hash_type)
     if source_celltype == target_celltype:
         return True

@@ -398,6 +398,9 @@ def deserializable_as(
     ti = _coerce(hash_type)
     kind = ti.kind
     checksum_obj = None if checksum is None else Checksum(checksum)
+    from .null import is_null
+    if is_null(checksum_obj):
+        return True
     if celltype == "bytes":
         return True
     if celltype in ("text", "yaml", "ipython", "python"):

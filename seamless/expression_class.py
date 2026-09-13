@@ -66,7 +66,7 @@ class Expression:
     materialization are later mechanics.
     """
 
-    input_ref: Any
+    _input_ref: Any
     path: str | None = ""
     _: KW_ONLY
     input_celltype: str | None = None
@@ -87,8 +87,17 @@ class Expression:
     )
 
     def __post_init__(self) -> None:
+        from .cell_class import Cell, _typed_input_celltype, _check_input_ref
+        ref = self._input_ref
+        _check_input_ref(ref)
+        typed = _typed_input_celltype(ref)
+        if typed is not None and self.input_celltype is not None and self.input_celltype != typed:
+            raise ValueError("input_celltype disagrees with the typed source's celltype")
+        if isinstance(ref, Cell):
+            ref = ref.build()
+            object.__setattr__(self, "_input_ref", ref)
         if self.input_celltype is None:
-            object.__setattr__(self, "input_celltype", self.celltype if self.celltype is not None else "mixed")
+            object.__setattr__(self, "input_celltype", typed or self.celltype or "mixed")
         path = normalize_path(self.path)
         celltype = (
             self.input_celltype if self.celltype is None else self.celltype
@@ -102,6 +111,14 @@ class Expression:
         if self.input_checksum is not None:
             self.input_checksum.incref_refholder()
         register_refholder(self)
+
+    @property
+    def source(self):
+        return None if isinstance(self._input_ref, Checksum) else self._input_ref
+
+    @property
+    def checksum(self):
+        return self.result
 
     @property
     def result(self) -> Checksum | None:
@@ -125,7 +142,7 @@ class Expression:
 
         from .checksum.expression import evaluate_expression, evaluate_expression_remote
 
-        input_ref = self.input_ref
+        input_ref = self._input_ref
         if isinstance(input_ref, Expression):
             input_checksum = input_ref._evaluate_internal(execution=execution)
         elif hasattr(input_ref, "_compute_dependency"):
@@ -163,7 +180,7 @@ class Expression:
 
         from .checksum.expression import evaluate_expression_async, evaluate_expression_remote
 
-        input_ref = self.input_ref
+        input_ref = self._input_ref
         if isinstance(input_ref, Expression):
             input_checksum = await input_ref._evaluate_internal_async(execution=execution)
         elif hasattr(input_ref, "_compute_dependency_async"):
@@ -262,14 +279,14 @@ class Expression:
     @property
     def input_checksum(self) -> Checksum | None:
         try:
-            return Checksum(self.input_ref)
+            return Checksum(self._input_ref)
         except (TypeError, ValueError):
-            return self.input_ref if isinstance(self.input_ref, Checksum) else None
+            return self._input_ref if isinstance(self._input_ref, Checksum) else None
 
     @property
     def identity_key(self) -> tuple[Any, str, str, str]:
         return (
-            _input_ref_key(self.input_ref),
+            _input_ref_key(self._input_ref),
             self.path,
             self.input_celltype,
             self.celltype,
@@ -333,7 +350,7 @@ class Expression:
     def __repr__(self) -> str:
         cls = type(self).__name__
         return (
-            f"{cls}(input_ref={self.input_ref!r}, path={self.path!r}, "
+            f"{cls}({self._input_ref!r}, path={self.path!r}, "
             f"input_celltype={self.input_celltype!r}, celltype={self.celltype!r})"
         )
 

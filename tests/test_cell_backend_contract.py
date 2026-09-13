@@ -35,7 +35,7 @@ def test_bound_cell_uses_backend_path_and_api_names():
 
     try:
         cell.input_ref = "checksum"
-    except BoundStateError:
+    except AttributeError:
         pass
     else:
         raise AssertionError("bound input_ref mutation must be rejected")

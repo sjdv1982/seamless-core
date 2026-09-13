@@ -68,7 +68,7 @@ from .checksum_class import Checksum as _Checksum
 from .buffer_class import Buffer as _Buffer
 from .expression_class import Expression as _Expression
 from .cell_class import Cell as _Cell, SubCell as _SubCell
-from .cell_errors import BoundStateError, ProjectionError
+from .cell_errors import BoundStateError, ProjectionError, AuthorityError
 from .shutdown import close
 
 # Expose classes under the top-level module so their repr shows seamless.<Class>
@@ -88,6 +88,7 @@ __all__ = [
     "Buffer",
     "Expression",
     "Cell",
+    "AuthorityError",
     "SubCell",
     "BoundStateError",
     "ProjectionError",

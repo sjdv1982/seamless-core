@@ -84,6 +84,9 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     if celltype not in celltypes:
         raise TypeError(celltype)
     checksum = Checksum(checksum)
+    from .null import is_null
+    if is_null(checksum):
+        return b"" if celltype == "bytes" else None
     logger.debug(
         "DESERIALIZE: buffer of length {}, checksum {}".format(len(buffer), checksum)
     )

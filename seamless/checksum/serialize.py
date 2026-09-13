@@ -18,6 +18,9 @@ def _serialize(value, celltype: str):
     from seamless import Checksum
     from .json_ import json_dumps_bytes
 
+    if value is None:
+        from .null import NULL_BUFFER
+        return NULL_BUFFER
     if isinstance(value, Checksum):
         value = value.hex()
     if celltype == "str":
@@ -70,6 +73,9 @@ def _serialize(value, celltype: str):
                 buffer = mixed_serialize(value)
         else:
             raise TypeError(celltype)
+    if celltype == "bytes" and buffer == b"":
+        from .null import NULL_BUFFER
+        buffer = NULL_BUFFER
     logger.debug("SERIALIZE: buffer of length {}".format(len(buffer)))
     return buffer
 

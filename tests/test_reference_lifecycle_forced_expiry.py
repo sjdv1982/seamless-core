@@ -48,14 +48,14 @@ def test_cell_input_survives_forced_expiry_and_unowned_control(monkeypatch):
     cache = get_buffer_cache()
     source = Buffer(_unique_bytes("cell"), "bytes")
     checksum = source.get_checksum()
-    cell = Cell(input_ref=checksum, input_celltype="bytes")
+    cell = Cell(checksum=checksum, celltype="bytes")
     _assert_claims(cell, checksum, "input")
     del source
     gc.collect()
 
     evidence = force_expiry(checksum, cache=cache)
     assert evidence.after["accounting"] == (1, 0, True)
-    assert cell.input_ref.resolve("bytes").content.startswith(b"cell-")
+    assert cell._input_ref.resolve("bytes").content.startswith(b"cell-")
     assert evidence.after["strong"] is True
 
     cell._release_refholds()
@@ -124,7 +124,7 @@ def test_repeated_public_expression_access_has_one_result_role(monkeypatch):
 def test_deepcell_top_level_checksum_is_the_only_claim(monkeypatch):
     source = Buffer({"token": uuid4().hex}, "deepcell")
     checksum = source.get_checksum()
-    cell = Cell(input_ref=checksum, input_celltype="deepcell")
+    cell = Cell(checksum=checksum, celltype="deepcell")
     claims = collect_refholder_claims([cell]).get(checksum, [])
     assert [(holder, role) for holder, role in claims] == [(cell, "input")]
     evidence = force_expiry(checksum)

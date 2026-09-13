@@ -9,6 +9,9 @@ DIRECTORY_CELLTYPES = frozenset(('folder', 'deepfolder'))
 def canon_T(content: bytes, celltype: str) -> bytes:
     if celltype not in FILE_CELLTYPES:
         raise TypeError(f'Celltype {celltype!r} cannot be mounted as a file')
+    from .null import NULL_BUFFER
+    if content in (b'', NULL_BUFFER):
+        return NULL_BUFFER
     if celltype == 'bytes':
         return bytes(content)
     # Code assignment serializes text without executing or syntax-checking it.

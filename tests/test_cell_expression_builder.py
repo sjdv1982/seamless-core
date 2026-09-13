@@ -21,7 +21,7 @@ INVALID_EXPRESSION_CASES = tuple(
 
 
 def _cell_from_case(source_checksum, case):
-    cell = Cell(input_ref=source_checksum, input_celltype=case.celltype)
+    cell = Cell(checksum=source_checksum, celltype=case.celltype)
     for kind, payload in parse_path(case.path):
         if kind == "item":
             cell = cell[payload]
@@ -85,10 +85,10 @@ def test_cell_built_invalid_expressions_match_direct_failures(witness, case):
 def test_mutating_cell_after_build_does_not_affect_expression():
     first_checksum = Buffer({"a": 1}, "plain").get_checksum()
     second_checksum = Buffer({"a": 2}, "plain").get_checksum()
-    cell = Cell(input_ref=first_checksum, input_celltype="plain").a
+    cell = Cell(checksum=first_checksum, celltype="plain").a
 
     expression = cell.build()
-    cell.input_ref = second_checksum
+    cell.checksum = second_checksum
     cell.path = ".b"
     cell.celltype = "mixed"
 
@@ -100,10 +100,10 @@ def test_mutating_cell_after_build_does_not_affect_expression():
 def test_single_cell_builds_independent_expressions_after_reassignment():
     first_checksum = Buffer({"a": 1}, "plain").get_checksum()
     second_checksum = Buffer({"a": 2}, "plain").get_checksum()
-    cell = Cell(input_ref=first_checksum, input_celltype="plain").a
+    cell = Cell(checksum=first_checksum, celltype="plain").a
 
     first = cell.build()
-    cell.input_ref = second_checksum
+    cell.checksum = second_checksum
     second = cell.build()
 
     assert first.input_checksum == first_checksum
@@ -112,7 +112,7 @@ def test_single_cell_builds_independent_expressions_after_reassignment():
 
 
 def test_derived_cell_navigation_does_not_mutate_parent_cell():
-    parent = Cell(input_celltype="text")
+    parent = Cell(celltype="text")
     child = parent[0].as_celltype("str")
 
     assert parent.path == ""
@@ -123,7 +123,7 @@ def test_derived_cell_navigation_does_not_mutate_parent_cell():
 
 def test_cell_call_remains_expression_builder():
     checksum = Buffer({"a": 1}, "plain").get_checksum()
-    expression = Cell(input_ref=checksum, input_celltype="plain").a()
+    expression = Cell(checksum=checksum, celltype="plain").a()
 
     assert isinstance(expression, Expression)
     assert expression.path == "a"

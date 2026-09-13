@@ -72,8 +72,8 @@ def test_input_rename_preserves_bound_celltype():
     assert backend.celltype == "str"
 
 
-@pytest.mark.parametrize("make", [Cell, lambda **kw: Expression(None, **kw)])
-@pytest.mark.parametrize("kwargs,expected", [({}, "mixed"), ({"input_celltype": "str"}, "str"), ({"celltype": "text"}, "text")])
-def test_type_defaults_are_symmetric(make, kwargs, expected):
-    value = make(**kwargs)
-    assert value.input_celltype == value.celltype == expected
+@pytest.mark.parametrize("celltype", ["int", "str", "text", "mixed"])
+def test_unwired_cell_has_no_input_type(celltype):
+    cell = Cell(celltype)
+    assert cell.input_celltype is None
+    assert cell.celltype == celltype

@@ -1,3 +1,5 @@
+Canonical JSON null (`b"null\n"`, checksum `38e0b9de…`) is accepted in every celltype and converts to itself. Resolving it as `bytes` returns `b""`; every other celltype returns `None`. Empty byte values canonicalize to that same null checksum.
+
 # TypeBits — a bit-flag description of "not-quite Seamless types"
 
 Status: design note. Supersedes `BufferInfo` (see [`buffer_info.py`](buffer_info.py)).
