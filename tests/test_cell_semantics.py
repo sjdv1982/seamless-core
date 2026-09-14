@@ -99,3 +99,11 @@ def test_reinterpretation_validates_and_keeps_checksum():
 def test_bytes_value_and_run_agree():
     cell = Cell('bytes'); cell.set(b'payload')
     assert cell.value == cell.run() == cell.build().run() == b'payload'
+
+
+@pytest.mark.parametrize('celltype', ['int', 'binary', 'bytes', 'plain', 'str'])
+def test_empty_bytes_input_converts_as_null(celltype):
+    from seamless import Expression
+    expression = Expression(Buffer(b'').get_checksum(), input_celltype='bytes', celltype=celltype)
+    assert expression.compute() == Buffer(None, 'plain').get_checksum()
+    assert expression.run() == (b'' if celltype == 'bytes' else None)

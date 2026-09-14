@@ -25,6 +25,11 @@ class ExpressionKey:
     input_celltype: str
     celltype: str
 
+    def __post_init__(self):
+        from .null import canonicalize_checksum
+        object.__setattr__(self, "input_checksum",
+            canonicalize_checksum(self.input_checksum, self.input_celltype))
+
 
 _expression_cache: dict[tuple[str, str, str, str], Checksum] = {}
 _expression_result_buffers: weakref.WeakValueDictionary[Checksum, Buffer] = (
