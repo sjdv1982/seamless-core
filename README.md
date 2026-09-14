@@ -70,16 +70,55 @@ checksum; it is cached locally and can be shared through `seamless-database`.
 Expressions are immutable structural references keyed by exactly:
 
 ```text
-(input_checksum, path, celltype, target_celltype)
+(input_checksum, path, input_celltype, celltype)
 ```
 
 Validator fields are deliberately excluded from this cache identity. Empty-path
 expressions own checksum-changing celltype conversions; conversion-result
 checksums are not recreated as BufferInfo side fields.
 
-`Cell` remains the mutable expression builder. `Cell.__call__()` keeps returning
-an `Expression` for compatibility; use `cell.compute()` or `cell.run()` to
-resolve the built expression.
+`Cell` is a mutable expression builder. `celltype` always describes the produced
+checksum/value; retyping converts the stored input. The read-only `input_celltype`
+follows a typed source live, or records the type used when a literal/checksum was
+assigned. New cells copy a typed source's output type once; otherwise they default
+to `mixed`. Existing cells keep their output type when rewired.
+
+```python
+from seamless import Buffer, Cell, Expression
+
+cell = Cell("str", checksum=Buffer(42, "int").get_checksum(), input_celltype="int")
+assert cell.run() == "42"
+cell.celltype = "text"
+assert cell.run() == "42"
+expression = Expression(cell)  # freezes the input recipe and its type now
+```
+
+The constructor accepts either `checksum=` or `source=`, never both. A typed
+source's input type cannot be overridden with a conflicting declaration.
+`cell.source` reports the typed upstream reference, or None for a literal;
+`cell.checksum`, `.buffer`, and `.value` report the produced value. `build()` and
+calling a Cell return an immutable Expression. `with_input()` derives a builder
+with a replacement reference. Public `input_ref` and `target_celltype` are retired
+and raise a replacement-directed error; `_input_ref` is a private recipe field.
+
+At the root, assigning `.value`, `.buffer`, or `.checksum` declares a new input
+and detaches a source. Their ownership-checking counterparts are `.set()`,
+`.set_buffer()`, and `.set_checksum(cs, input_celltype=...)`; these raise
+`AuthorityError` on a connected input. Buffer writes validate and deposit bytes;
+checksum writes declare an interpretation without resolving bytes. Sub-path
+writes retain ownership checks.
+
+`None` is a value for every Cell type, serialized as `b"null\n"` with checksum
+`38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed`.
+This buffer is trivial and resolves without cache residency. Null converts to
+itself for every type pair; resolving as `bytes` gives `b""`, otherwise None.
+Empty bytes canonicalize to the same checksum. `.value = None` stores null;
+`.checksum = None`, `.buffer = None`, and the corresponding set methods clear
+input. `del` remains deletion.
+
+`CellBase` provides the shared value/type/evaluation API for Cell and the
+transformer's sister class Pin. Cell alone adds projection, validators, mounts,
+derivation, and source protocols. A Pin cannot be used as an input reference.
 
 Transformations can now accept expression handles as inputs, alongside concrete
 checksums and transformation futures. Dask submissions represent these as

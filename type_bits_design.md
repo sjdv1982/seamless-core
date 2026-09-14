@@ -35,7 +35,7 @@ What `TypeBits` deliberately does **not** carry:
 - **Cached conversion results** (`str2text`, `text2str`, `bytes2binary`,
   `binary2json`, `json2binary` in the old `BufferInfo`). Each is just a cheap
   **Expression** with an empty path —
-  `Expression(input_ref=checksum, path="", celltype=source, target_celltype=target)` —
+  `Expression(checksum, path="", input_celltype=source, celltype=target)` —
   whose result checksum is cached in `seamless.db` under
   `database_key = (input_checksum, "", source, target)`, exactly like a
   Transformation. They are recovered from the Expression cache and must not be
@@ -317,6 +317,10 @@ here (§9).
 
 "Strict" = *`parse_buffer(buffer, celltype)` would succeed.* Matches
 `verify_buffer_info` / `validate_buffer_info`:
+
+Canonical null is accepted before these predicates, for every celltype. The table
+below describes non-null inputs. Function pins/results apply their stricter null
+boundary separately; HashType describes storage compatibility.
 
 | celltype | predicate |
 |---|---|
@@ -822,12 +826,13 @@ class Flag(IntFlag):
 def UTF8(k):  return k >= Kind.RAW_TEXT         # derived; RAW_TEXT and every JSON_*
 
 # the three singleton buffers — bool/null need no bit, but get a total TypeBits
-CHECKSUM_TRUE  = checksum_of(b"true")
-CHECKSUM_FALSE = checksum_of(b"false")
-CHECKSUM_NULL  = checksum_of(b"null")
+CHECKSUM_TRUE  = checksum_of(b"true\n")
+CHECKSUM_FALSE = checksum_of(b"false\n")
+CHECKSUM_NULL  = checksum_of(b"null\n")
 
 
 def deserializable_as(ti, checksum, celltype: str) -> bool:
+    if checksum == CHECKSUM_NULL: return True  # storage, not function boundary
     k = ti.kind
     if celltype == "bytes":  return True
     if celltype == "text":   return UTF8(k)
@@ -915,9 +920,9 @@ Each row is one distinct `TypeBits`, with a buffer (or a snippet that builds one
 | 21 | `JSON_STRING` | NA | SCALAR | | | | `b'"hello"'` (non-numeric) |
 | 22 | `JSON_STRING` | NA | SCALAR | ✓ | | | `b'"42"'` (numeric string) |
 | 23 | `JSON_NUMBER` | NA | SCALAR | ✓ | | | `b'3.14'` |
-| 24 | *(const)* | — | — | — | — | — | `b"true"` → `CHECKSUM_TRUE`, pre-tabulated (§4) |
-| 25 | *(const)* | — | — | — | — | — | `b"false"` → `CHECKSUM_FALSE` |
-| 26 | *(const)* | — | — | — | — | — | `b"null"` → `CHECKSUM_NULL` |
+| 24 | *(const)* | — | — | — | — | — | `b"true\n"` → `CHECKSUM_TRUE`, pre-tabulated (§4) |
+| 25 | *(const)* | — | — | — | — | — | `b"false\n"` → `CHECKSUM_FALSE` |
+| 26 | *(const)* | — | — | — | — | — | `b"null\n"` → `CHECKSUM_NULL` |
 
 Rows that the invariants make **unreachable** (worth stating, since they are the
 common bugs): `DType`/`Rank ≠ NA`/`SCALAR` with a non-`NUMPY` `Kind`; `NUMPY_BYTES`
@@ -935,7 +940,7 @@ Each structural class is multiplied by the `Length` buckets its buffer can take:
 | `MIXED_*` | `SHORT` (tiny) / `MEDIUM` / `LONG` | magic + skeleton; `EQ64` only by coincidence |
 | `JSON_OBJECT`/`ARRAY`/`STRING` | `SHORT` … `LONG` | any size ≥ 2 |
 | `JSON_NUMBER` | `SHORT` … `LONG` | `LONG` (>1000 digits) is valid but **forbids** numeric conversion (§6) |
-| `bool`/`null` consts | fixed (`SHORT`) | the three buffers are 4/5/4 bytes |
+| `bool`/`null` consts | fixed (`SHORT`) | the three buffers are 5/6/5 bytes |
 
 Two `Length` witnesses the design leans on:
 
