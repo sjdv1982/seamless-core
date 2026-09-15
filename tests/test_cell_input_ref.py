@@ -85,10 +85,10 @@ def test_set_hex_string_is_a_value_not_a_checksum():
     assert cell.run() == text
 
 
-def test_set_checksum_is_passed_through():
+def test_set_checksum_declares_the_checksum():
     checksum = Buffer(b"set checksum").get_checksum()
     cell = Cell(celltype="bytes")
-    cell.set(checksum)
+    cell.set_checksum(checksum)
     assert cell.checksum == checksum
 
 

@@ -25,6 +25,9 @@ class Kind(IntEnum):
     JSON_ARRAY = 6
     JSON_STRING = 7
     JSON_NUMBER = 8
+    UNTESTED = 9
+    UTF8_UNTESTED = 10
+    JSON_UNTESTED = 11
 
 
 class Length(IntEnum):
@@ -78,11 +81,22 @@ class HashType:
 
     @property
     def is_utf8(self) -> bool:
-        return self.kind >= Kind.RAW_TEXT
+        return self.kind in (
+            Kind.RAW_TEXT, Kind.JSON_OBJECT, Kind.JSON_ARRAY,
+            Kind.JSON_STRING, Kind.JSON_NUMBER,
+            Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED,
+        )
 
     @property
     def is_json(self) -> bool:
-        return self.kind >= Kind.JSON_OBJECT
+        return self.kind in (
+            Kind.JSON_OBJECT, Kind.JSON_ARRAY, Kind.JSON_STRING,
+            Kind.JSON_NUMBER, Kind.JSON_UNTESTED,
+        )
+
+    @property
+    def is_untested(self) -> bool:
+        return self.kind in (Kind.UNTESTED, Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED)
 
     @property
     def mic(self) -> str:
@@ -102,7 +116,7 @@ class HashType:
 
     def deserializable_as(
         self, celltype: str, *, checksum: Checksum | str | bytes | None = None
-    ) -> bool:
+    ) -> bool | None:
         return deserializable_as(self, celltype, checksum=checksum)
 
     def capabilities(self, source_celltype: str) -> set[str]:
@@ -154,6 +168,9 @@ MIC_BY_KIND = {
     Kind.JSON_ARRAY: "plain",
     Kind.JSON_STRING: "str",
     Kind.JSON_NUMBER: "float",
+    Kind.UNTESTED: "bytes",
+    Kind.UTF8_UNTESTED: "text",
+    Kind.JSON_UNTESTED: "plain",
 }
 
 FLAT_SEQ_CELLTYPES = {"text", "str", "python", "ipython", "yaml"}
@@ -262,13 +279,47 @@ def get_hash_type_cache() -> dict[Checksum, int]:
 
 
 def set_hash_type(checksum: Checksum | str | bytes, hash_type: HashType | int) -> None:
-    """Store a valid HashType word for a checksum."""
+    """Tighten local knowledge; ignore looser writes and reject contradictions."""
 
     checksum = Checksum(checksum)
     word = hash_type.word if isinstance(hash_type, HashType) else int(hash_type)
     if not is_valid_word(word):
         raise ValueError(f"Invalid HashType word: {word!r}")
+    stored_word = _hash_type_cache.get(checksum)
+    if stored_word is not None:
+        if stored_word == word:
+            return
+        stored = unpack(stored_word)
+        incoming = unpack(word)
+        if _hash_type_implies(stored, incoming):
+            return
+        if not _hash_type_implies(incoming, stored):
+            import logging
+
+            message = (
+                f"Conflicting HashType for {checksum.hex()}: "
+                f"stored={stored_word}, incoming={word}"
+            )
+            logging.getLogger(__name__).error(message)
+            raise ValueError(message)
     _hash_type_cache[checksum] = word
+
+
+def _hash_type_implies(tighter: HashType, looser: HashType) -> bool:
+    """Whether tighter contains all tested facts in looser.
+
+    Length is always tested. At untested levels all flags are placeholders;
+    concrete words must agree on every field, including NUMERIC_SCALAR.
+    """
+    if tighter.length != looser.length:
+        return False
+    if looser.kind == Kind.UNTESTED:
+        return True
+    if looser.kind == Kind.UTF8_UNTESTED:
+        return tighter.is_utf8
+    if looser.kind == Kind.JSON_UNTESTED:
+        return tighter.is_json
+    return tighter == looser
 
 
 def get_hash_type(checksum: Checksum | str | bytes) -> HashType | None:
@@ -395,8 +446,8 @@ def deserializable_as(
     celltype: str,
     *,
     checksum: Checksum | str | bytes | None = None,
-) -> bool:
-    """Return whether a checksum with this HashType can deserialize as celltype."""
+) -> bool | None:
+    """Return True (known), False (disproved), or None (requires parsing)."""
 
     ti = _coerce(hash_type)
     kind = ti.kind
@@ -405,6 +456,24 @@ def deserializable_as(
         return True
     if celltype == "bytes":
         return True
+    if celltype == "bool":
+        return checksum_obj in _BOOL_CHECKSUMS
+    if ti.is_untested:
+        if celltype in ("text", "yaml", "ipython", "python"):
+            return True if ti.is_utf8 else None
+        if celltype in ("plain", "mixed"):
+            return True if ti.is_json else None
+        if celltype == "str":
+            return True if checksum_obj in _SCALAR_CONST_CHECKSUMS else None
+        if celltype in ("int", "float"):
+            return False if ti.length == Length.LONG else None
+        if celltype == "binary":
+            return None if kind == Kind.UNTESTED else False
+        if celltype == "checksum":
+            if ti.length != Length.EQ64 or kind == Kind.JSON_UNTESTED:
+                return False
+            return None
+        return False
     if celltype in ("text", "yaml", "ipython", "python"):
         return ti.is_utf8
     if celltype == "plain":
@@ -417,14 +486,13 @@ def deserializable_as(
         if ti.length == Length.LONG:
             return False
         return bool(ti.flags & Flag.NUMERIC_SCALAR)
-    if celltype == "bool":
-        return checksum_obj in _BOOL_CHECKSUMS
     if celltype == "binary":
         return kind == Kind.NUMPY
     if celltype == "mixed":
         return kind not in (Kind.RAW_BYTES, Kind.RAW_TEXT)
     if celltype == "checksum":
-        return kind == Kind.RAW_TEXT and ti.length == Length.EQ64
+        # A digest of only decimal digits is also a JSON number.
+        return kind in (Kind.RAW_TEXT, Kind.JSON_NUMBER) and ti.length == Length.EQ64
     return False
 
 

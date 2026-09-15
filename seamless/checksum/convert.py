@@ -340,14 +340,8 @@ def _convert_values(
         return _buffer_result(Buffer(checksum.hex().encode()))
 
     if source == "checksum":
-        value = _value_of(checksum, "checksum", get_buffer)
-        if not isinstance(value, str):
-            if target == "plain":
-                return checksum, None
-            raise SeamlessConversionError(
-                "Cannot convert a deep checksum value without an expression path"
-            )
-        return Checksum(value), None
+        # A checksum value refers to another buffer; the conversion dereferences it.
+        return Checksum(_value_of(checksum, "checksum", get_buffer)), None
 
     value = _value_of(checksum, source, get_buffer)
     conv = (source, target)

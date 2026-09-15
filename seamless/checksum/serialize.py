@@ -55,7 +55,12 @@ def _serialize(value, celltype: str):
         if buffer is None:
             buffer = (str(value).rstrip("\n")).encode()
     elif celltype == "checksum":
-        buffer = json_dumps_bytes(value) + b"\n"
+        # The bare 64-character hex digest, without a newline.
+        if not isinstance(value, str):
+            raise TypeError(
+                f"A checksum value must be a Checksum or a hex string, not {type(value).__name__}"
+            )
+        buffer = Checksum(value).hex().encode()
     else:
         if celltype == "mixed":
             from ..util.mixed.io import serialize as mixed_serialize

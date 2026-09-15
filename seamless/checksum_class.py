@@ -473,7 +473,13 @@ class Checksum:
         )
 
     def __str__(self):
-        return str(self.hex())
+        # ``NULL`` is intentionally a display-only spelling.  Machine formats
+        # must use ``.hex()`` so that they remain valid checksum strings.
+        from .checksum.null import NULL_CHECKSUM
+
+        if self.hex() == NULL_CHECKSUM:
+            return "NULL"
+        return self.hex()
 
     def __repr__(self):
         return repr(self.hex())

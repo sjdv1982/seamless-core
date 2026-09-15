@@ -37,6 +37,10 @@ class CellBase:
         check_retired_name(name)
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name):
+        check_retired_name(name)
+        object.__delattr__(self, name)
+
     def __repr__(self):
         return (f"{type(self).__name__}(input_celltype={self.input_celltype!r}, "
                 f"celltype={self.celltype!r}{self._repr_state()})")
@@ -178,13 +182,24 @@ class CellBase:
             raise AuthorityError("The input is controlled by a source; assign .value, .buffer or .checksum to replace it")
 
     def _write_value(self, value, *, detach=False):
+        # .set() and .value take values; a reference is connected by assignment.
+        # A Checksum is a value exactly when the celltype is checksum.
+        from .checksum_class import Checksum
+        checksum_value = isinstance(value, Checksum) and self.celltype == "checksum"
+        if value is not None and not checksum_value and _is_input_ref(value):
+            if isinstance(value, Checksum):
+                raise TypeError(
+                    "A Checksum is not a value: use .set_checksum() "
+                    "(a Checksum is a value only for celltype 'checksum')"
+                )
+            raise TypeError(
+                f"A {type(value).__name__} is not a value: connect it by assignment, "
+                "or with Cell(source=...)"
+            )
         if self._workflow_backend is not None:
             return self._workflow_backend.write_value(value, detach=detach)
         self._check_write_authority(detach)
-        if value is not None and _is_input_ref(value):
-            self._replace_input_ref(value)
-        else:
-            self._replace_input_ref(_serialize_value(value, self.celltype), input_celltype=self.celltype)
+        self._replace_input_ref(_serialize_value(value, self.celltype), input_celltype=self.celltype)
 
     def _write_checksum(self, checksum, *, input_celltype=None, detach=False):
         if self._workflow_backend is not None:

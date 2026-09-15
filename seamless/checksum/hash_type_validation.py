@@ -32,6 +32,21 @@ class HashTypeValidationError(ValueError):
     """Raised when HashType proves a checksum/celltype operation impossible."""
 
 
+def _deserialization_error(
+    checksum: Checksum,
+    hash_type: HashType,
+    celltype: str,
+) -> HashTypeValidationError:
+    return HashTypeValidationError(
+        _message(
+            "Cannot deserialize checksum as requested celltype",
+            checksum,
+            hash_type,
+            celltype=celltype,
+        )
+    )
+
+
 def ensure_hash_type(
     checksum: Checksum | str | bytes,
     *,
@@ -76,15 +91,8 @@ def validate_deserializable_as(
     hash_type = ensure_hash_type(checksum, buffer=buffer)
     if hash_type is None:
         return None
-    if not hash_type.deserializable_as(celltype, checksum=checksum):
-        raise HashTypeValidationError(
-            _message(
-                "Cannot deserialize checksum as requested celltype",
-                checksum,
-                hash_type,
-                celltype=celltype,
-            )
-        )
+    if hash_type.deserializable_as(celltype, checksum=checksum) is False:
+        raise _deserialization_error(checksum, hash_type, celltype)
     return hash_type
 
 
@@ -100,7 +108,7 @@ async def validate_deserializable_as_async(
     hash_type = await ensure_hash_type_async(checksum, buffer=buffer)
     if hash_type is None:
         return None
-    if not hash_type.deserializable_as(celltype, checksum=checksum):
+    if hash_type.deserializable_as(celltype, checksum=checksum) is False:
         raise HashTypeValidationError(
             _message(
                 "Cannot deserialize checksum as requested celltype",
@@ -203,7 +211,7 @@ def conversion_feasible(
     hash_type = hash_type if isinstance(hash_type, HashType) else HashType.unpack(hash_type)
     if source_celltype == target_celltype:
         return True
-    if not hash_type.deserializable_as(source_celltype, checksum=checksum):
+    if hash_type.deserializable_as(source_celltype, checksum=checksum) is False:
         return False
     conv = (source_celltype, target_celltype)
     conv = conversion_equivalent.get(conv, conv)
@@ -216,8 +224,14 @@ def conversion_feasible(
     if conv in conversion_reinterpret:
         return hash_type.deserializable_as(target_celltype, checksum=checksum)
     if conv in conversion_possible:
+        if hash_type.is_untested:
+            if target_celltype in ("int", "float") and hash_type.length.name == "LONG":
+                return False
+            return None
         return _possible_conversion_feasible(hash_type, source_celltype, target_celltype)
     if conv in conversion_values:
+        if hash_type.is_untested:
+            return None
         return _value_conversion_feasible(hash_type, source_celltype, target_celltype)
     return None
 
@@ -237,6 +251,8 @@ def _validate_path_capability(
     a ``bytes`` item is an int, and a numeric numpy array admits as many
     positional item steps as its rank.
     """
+    if hash_type.is_untested:
+        return
     caps = hash_type.capabilities(source_celltype)
     rank = int(hash_type.rank)
     for kind, payload in path_steps:

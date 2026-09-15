@@ -10,7 +10,14 @@ NULL_CHECKSUM = sha256(NULL_BUFFER).hexdigest()
 def is_null(checksum):
     if isinstance(checksum, bytes):
         return checksum in (bytes.fromhex(NULL_CHECKSUM), NULL_CHECKSUM.encode())
-    return checksum is not None and str(checksum) == NULL_CHECKSUM
+    if checksum is None:
+        return False
+    from seamless.checksum_class import Checksum
+
+    try:
+        return Checksum(checksum).hex() == NULL_CHECKSUM
+    except (TypeError, ValueError):
+        return False
 
 
 def is_null_value(checksum):

@@ -16,6 +16,11 @@ While `seamless-core` underpins higher-level Seamless packages (`seamless-config
 - `incref()` / `decref()` / `tempref()` — reference counting to keep buffers alive in the cache.
 - `load()` / `save()` — file I/O (auto-appends `.CHECKSUM` extension).
 
+The canonical null checksum prints as `NULL` with `str(checksum)` for readability;
+use `checksum.hex()` (and not the display form) in serialized data, URLs, and other
+machine-readable formats. `repr(checksum)` remains the hexadecimal digest, and
+`Checksum("NULL")` is invalid.
+
 ### Buffer
 
 `Buffer` represents raw content (bytes) paired with an optional checksum. It bridges Python values and content-addressed storage:
@@ -104,7 +109,16 @@ and raise a replacement-directed error; `_input_ref` is a private recipe field.
 At the root, assigning `.value`, `.buffer`, or `.checksum` declares a new input
 and detaches a source. Their ownership-checking counterparts are `.set()`,
 `.set_buffer()`, and `.set_checksum(cs, input_celltype=...)`; these raise
-`AuthorityError` on a connected input. Buffer writes validate and deposit bytes;
+`AuthorityError` on a connected input. `.set()` and `.value =` take values only: a
+Checksum goes through `.set_checksum()`, and a source is connected by assignment or
+with `Cell(source=...)`. Passing a reference raises `TypeError`.
+
+Celltype `checksum` holds a checksum as its value: `.value` is a `Checksum`, and the
+buffer is the bare 64-character hex digest, which the cell doesn't hold. For this
+celltype alone, a `Checksum` or its hex string is a value in `.set()`, `.value =`,
+assignment, `tf.pins.x =` and `tf(x=...)`. For every other celltype, assignment and
+call-time arguments read a `Checksum` as a declared reference. A 64-character string
+is always a value. Buffer writes validate and deposit bytes;
 checksum writes declare an interpretation without resolving bytes. Sub-path
 writes retain ownership checks.
 

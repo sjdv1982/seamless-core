@@ -25,8 +25,8 @@ class Buffer:
 
         if isinstance(value_or_buffer, Buffer):
             value_or_buffer = value_or_buffer.content
-        elif isinstance(value_or_buffer, Checksum):
-            raise TypeError
+        elif isinstance(value_or_buffer, Checksum) and celltype != "checksum":
+            raise TypeError("A Checksum is a value only for celltype 'checksum'")
 
         if celltype is None:
             if isinstance(value_or_buffer, Buffer):

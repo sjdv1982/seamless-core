@@ -1,6 +1,7 @@
 """Contract tests for scalar reference parsing and virtual checksums."""
 
 import asyncio
+import importlib
 import sys
 import types
 
@@ -23,6 +24,39 @@ from seamless.checksum.parse_buffer import _parse_buffer
 def _serialized(raw):
     buffer = Buffer(raw)
     return buffer, buffer.get_checksum()
+
+
+@pytest.mark.parametrize(
+    "raw,celltype",
+    [
+        (b"x =", "python"),
+        (b"value: [", "yaml"),
+    ],
+)
+def test_invalid_text_celltypes_raise_hashtype_validation_error(raw, celltype):
+    buffer, checksum = _serialized(raw)
+
+    with pytest.raises(HashTypeValidationError, match="Cannot deserialize"):
+        _parse_buffer(buffer, checksum, celltype)
+
+
+def test_failed_ipython_validation_raises_hashtype_validation_error(monkeypatch):
+    parse_buffer_module = importlib.import_module("seamless.checksum.parse_buffer")
+    buffer, checksum = _serialized(b"invalid ipython")
+
+    def reject_ipython(_text):
+        raise SyntaxError
+
+    monkeypatch.setattr(parse_buffer_module, "ipython2python", reject_ipython)
+    with pytest.raises(HashTypeValidationError, match="Cannot deserialize"):
+        _parse_buffer(buffer, checksum, "ipython")
+
+
+def test_nonhex_checksum_value_raises_hashtype_validation_error():
+    buffer, checksum = _serialized(b"z" * 64)
+
+    with pytest.raises(HashTypeValidationError, match="Cannot deserialize"):
+        _parse_buffer(buffer, checksum, "checksum")
 
 
 @pytest.mark.parametrize(

@@ -127,8 +127,10 @@ def validate_text_celltype(text, checksum: Checksum, celltype: str):
 
 
 def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
-    from seamless.checksum_class import validate_checksum
-    from .hash_type_validation import validate_deserializable_as
+    from .hash_type_validation import (
+        _deserialization_error,
+        validate_deserializable_as,
+    )
 
     if celltype not in celltypes:
         raise TypeError(celltype)
@@ -139,12 +141,16 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     logger.debug(
         "DESERIALIZE: buffer of length {}, checksum {}".format(len(buffer), checksum)
     )
-    validate_deserializable_as(checksum, celltype, buffer=buffer)
+    hash_type = validate_deserializable_as(checksum, celltype, buffer=buffer)
+    assert hash_type is not None
     if celltype in text_types2:
         s = buffer.decode()
         value = s.rstrip("\n")
         if checksum and validate_text_celltype is not None:
-            validate_text_celltype(value, checksum, celltype)
+            try:
+                validate_text_celltype(value, checksum, celltype)
+            except ValueError:
+                raise _deserialization_error(checksum, hash_type, celltype) from None
     elif celltype == "plain":
         value = _parse_buffer_plain(buffer.content)
     elif celltype == "binary":
@@ -162,18 +168,11 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     elif celltype in ("str", "int", "float", "bool"):
         value = _parse_scalar(buffer, celltype)
     elif celltype == "checksum":
+        # HashType admits only a 64-byte buffer: the bare hex digest.
         try:
-            value = buffer.decode()
-            if validate_checksum is not None:
-                validate_checksum(value)
-        except (ValueError, UnicodeDecodeError):
-            from ..util.mixed.io import deserialize as mixed_deserialize
-
-            value, storage = mixed_deserialize(buffer)
-            if storage != "pure-plain":
-                raise TypeError from None
-            if validate_checksum is not None:
-                validate_checksum(value)
+            value = Checksum(buffer.content.decode())
+        except (TypeError, ValueError, UnicodeDecodeError):
+            raise _deserialization_error(checksum, hash_type, celltype) from None
     else:
         raise NotImplementedError(celltype)
 
