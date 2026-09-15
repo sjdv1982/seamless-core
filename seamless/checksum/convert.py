@@ -16,6 +16,7 @@ from typing import Any
 import orjson
 import yaml
 
+from seamless import CacheMissError
 from seamless.buffer_class import Buffer
 from seamless.checksum_class import Checksum
 
@@ -77,9 +78,8 @@ def convert_checksum(
 
     try:
         return _convert(checksum, source, target, _LazyBuffer(get_buffer))
-    except _NeedsBuffer:
-        raise
-    except SeamlessConversionError:
+    except (_NeedsBuffer, SeamlessConversionError, CacheMissError):
+        # A missing buffer is not a failed conversion: it keeps its type.
         raise
     except Exception as exc:
         raise _conversion_error(checksum, source, target, exc) from None

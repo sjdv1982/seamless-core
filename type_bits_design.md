@@ -26,9 +26,10 @@ These two are orthogonal; they share one small integer (§4.1).
 non-boolean metadata that `BufferInfo` carried as plain fields (`length`,
 `dtype`, `shape`, `members`) is folded into the word in **reduced** form —
 small enums that retain exactly the resolution the queries in §§5–7 need
-(`Length`, `DType`, `Rank`; `members` is dropped — §4.3). And it is **total**: a
-`TypeBits` is never partially filled; every field always holds a definite value
-(§8).
+(`Length`, `DType`, `Rank`; `members` is dropped — §4.3). And its information
+**only grows**: a word either settles every field, or says explicitly how far it
+was tested, at one of three untested levels (§4.1). A stored word can only be
+replaced by a tighter one (§8.1).
 
 What `TypeBits` deliberately does **not** carry:
 
@@ -59,7 +60,15 @@ yaml ⊂ text           plain ⊂ yaml
 plain ⊂ bytes         plain ⊂ mixed
 binary ⊂ mixed
 str, int, float, bool ⊂ plain
+int, float, bool ⊂ str        int ⊂ float        float ⊂ int
 ```
+
+**Subtypes are subtypes of checksums.** A celltype is a subtype of another when
+every checksum it accepts is also accepted by the other. It says nothing about
+values: `"42"` is the string `"42"` as `plain` and 42 as `int`. Under the
+reference parser (§5), `int` and `float` accept exactly the same checksums, and
+`bool` shares no checksum with either. A conversion between nested celltypes
+keeps the checksum; the value comes from the target's parser.
 
 Deserializability uses **two more edges** than the trivial-conversion relation:
 
@@ -127,7 +136,7 @@ enum field instead of one bit each.
 - **UTF8** — `buffer.decode()` succeeds. It informed only `RAW` (text vs pure
   bytes) — `JSON ⟹ UTF8`, and `NUMPY`/`SEAMLESS_MIXED` are binary — so rather than
   a flag it is **folded into `Kind`**: `RAW` splits into `RAW_TEXT` (UTF-8) and
-  `RAW_BYTES` (not), and `UTF8 = kind ≥ RAW_TEXT` is derived (§4.1).
+  `RAW_BYTES` (not), and `UTF8` is derived by membership (§4.1).
 - **NUMERIC_SCALAR** — value converts to `int`/`float` (meaningful for
   `Kind ∈ {number, string}`).
 - **DType** — for `Kind = NUMPY`, the dtype *class* as an enum (`DType`, §4.3):
@@ -159,7 +168,7 @@ vanishes entirely.
 them — `true`, `false`, `null` — so their checksums are three module constants
 (`CHECKSUM_TRUE`, `CHECKSUM_FALSE`, `CHECKSUM_NULL`); membership is a direct
 checksum comparison, which is why `Kind` needs no `bool`/`null` value. Their full
-`TypeBits` is likewise three pre-tabulated constants, so they too are total (§8).
+`TypeBits` is likewise pre-tabulated, so they too are concrete (§8.1).
 
 Dropped from the first draft: the text-language **validity** flags
 (`IS_YAML`/`IS_IPYTHON`/`IS_PYTHON`) — out of scope, validity stays in
@@ -179,16 +188,19 @@ declared celltype, a higher layer, out of scope here (§9).
 ```python
 from enum import IntEnum, IntFlag
 
-class Kind(IntEnum):           # bits 0–3, range 0–8  (4 bits)
-    RAW_BYTES    = 0           # non-UTF-8 bytes (pure binary)
-    NUMPY        = 1           # .npy magic
-    MIXED_OBJECT = 2           # mixed magic, dict root
-    MIXED_ARRAY  = 3           # mixed magic, list/array root
-    RAW_TEXT     = 4           # non-JSON UTF-8 text     ← UTF8 begins here
-    JSON_OBJECT  = 5
-    JSON_ARRAY   = 6
-    JSON_STRING  = 7
-    JSON_NUMBER  = 8
+class Kind(IntEnum):           # bits 0–3, range 0–11  (4 bits)
+    RAW_BYTES     = 0          # non-UTF-8 bytes, no magic bytes
+    NUMPY         = 1          # .npy magic
+    MIXED_OBJECT  = 2          # mixed magic, dict root
+    MIXED_ARRAY   = 3          # mixed magic, list/array root
+    RAW_TEXT      = 4          # UTF-8 text, not JSON
+    JSON_OBJECT   = 5
+    JSON_ARRAY    = 6
+    JSON_STRING   = 7
+    JSON_NUMBER   = 8
+    UNTESTED      = 9          # nothing tested: any of 0–8
+    UTF8_UNTESTED = 10         # UTF-8, JSON not tested: one of 4–8
+    JSON_UNTESTED = 11         # JSON, which JSON type not tested: one of 5–8
 
 class Length(IntEnum):         # bits 4–5, range 0–3  (2 bits)
     SHORT  = 0                 # < 64 bytes
@@ -217,7 +229,7 @@ class Flag(IntFlag):           # bits 10–12
 Packed into **13 bits — a 2-byte word** (3 bits spare for future predicates):
 
 ```
-bit 0–3  : Kind             (0–8)
+bit 0–3  : Kind             (0–11)
 bit 4–5  : Length           (0–3)
 bit 6–7  : DType            (0–3)
 bit 8–9  : Rank             (0–3)
@@ -229,8 +241,10 @@ bit 12   : SEMANTIC
 Derived accessors (no stored bit):
 
 ```python
-UTF8           = kind >= Kind.RAW_TEXT          # RAW_TEXT and every JSON_* are UTF-8
-JSON           = kind >= Kind.JSON_OBJECT
+UTF8           = kind in (RAW_TEXT, JSON_OBJECT, JSON_ARRAY, JSON_STRING, JSON_NUMBER,
+                          UTF8_UNTESTED, JSON_UNTESTED)
+JSON           = kind in (JSON_OBJECT, JSON_ARRAY, JSON_STRING, JSON_NUMBER, JSON_UNTESTED)
+UNTESTED_LEVEL = kind in (UNTESTED, UTF8_UNTESTED, JSON_UNTESTED)
 RAW            = kind in (Kind.RAW_BYTES, Kind.RAW_TEXT)
 json_type      = ("object", "array", "string", "number")[kind - Kind.JSON_OBJECT] if JSON else None
 NUMPY          = kind == Kind.NUMPY
@@ -239,12 +253,29 @@ is_bool        = checksum in (CHECKSUM_TRUE, CHECKSUM_FALSE)
 is_null        = checksum == CHECKSUM_NULL
 ```
 
-Both `UTF8` and `JSON` are clean `≥` thresholds: the binary-ish kinds
-(`RAW_BYTES`, `NUMPY`, `MIXED_*`) sit below `RAW_TEXT`, then the UTF-8 kinds, then
-the JSON kinds, so "is UTF-8" and "is JSON" are single comparisons. The old `UTF8`
-flag is gone — it was `Kind`-derived for every kind *except* `RAW`, and splitting
-`RAW` into `RAW_TEXT`/`RAW_BYTES` supplies that one missing bit inside `Kind` (the
-4th `Kind` bit is paid for by the dropped flag — still 13 bits total).
+`UTF8` and `JSON` are set membership. Among the concrete kinds they would be `≥`
+thresholds, but the three untested kinds sit above them, and renumbering the
+existing kinds would change every stored word. The old `UTF8` flag is gone — it
+was `Kind`-derived for every kind *except* `RAW`, and splitting `RAW` into
+`RAW_TEXT`/`RAW_BYTES` supplies that one missing bit inside `Kind` (the 4th `Kind`
+bit is paid for by the dropped flag — still 13 bits total).
+
+**The untested levels.** A producer that hasn't tested how far a buffer goes
+stores one of three untested kinds instead of a guess. The kinds form a tree, and
+testing moves a word down it:
+
+| untested kind | means | narrows to |
+|---|---|---|
+| `UNTESTED` | nothing tested | `UTF8_UNTESTED`, `RAW_BYTES`, `NUMPY`, `MIXED_*` |
+| `UTF8_UNTESTED` | UTF-8; JSON not tested | `JSON_UNTESTED`, `RAW_TEXT` |
+| `JSON_UNTESTED` | JSON; which JSON type not tested | `JSON_OBJECT` … `JSON_NUMBER` |
+
+The binary kinds need no intermediate level, because their magic bytes are
+recognized in constant time. At an untested level, `Length` is still known,
+`DType` is `NA`, `Rank` is `SCALAR`, and every flag is 0. `NUMERIC_SCALAR` is
+untested there. It needs no "tested" bit: confirming a concrete JSON kind requires
+the value, and the `float(value)` probe then costs nothing (§8.2), so it is always
+tested for a concrete JSON kind.
 
 Determining `MIXED_OBJECT` vs `MIXED_ARRAY` is a one-token peek at the mixed
 skeleton (the byte after the magic is `{` or `[`), done while classifying `Kind`
@@ -313,37 +344,98 @@ ordinary dict/list of 64-hex strings. Its buffer's `Kind` is therefore already
 buffers are *deep* is the cell's declared celltype — a higher layer, out of scope
 here (§9).
 
-## 5. Method 1 — `deserializable_as(celltype) -> bool` (strict, Role 1)
+## 5. Method 1 — `deserializable_as(celltype) -> bool | None` (strict, Role 1)
 
-"Strict" = *`parse_buffer(buffer, celltype)` would succeed.* Matches
-`verify_buffer_info` / `validate_buffer_info`:
+"Strict" = *the reference parser accepts the buffer as that celltype.*
+`parse_buffer` implements the reference parser, and `deserializable_as` predicts
+it. Parsing is enough: the value is not re-serialized to check for a round trip.
+So one value can have several checksums: `42` and `"42"` are both the int 42.
+Identity stays with the checksum; two transformations that differ only in such a
+pin have different checksums and the same result.
 
-Canonical null is accepted before these predicates, for every celltype. The table
-below describes non-null inputs. Function pins/results apply their stricter null
-boundary separately; HashType describes storage compatibility.
+**Three outcomes.**
+
+| result | meaning |
+|---|---|
+| `True` | the parser accepts it (up to the value-level checks † and ‡) |
+| `False` | a negative is proven: the parser would reject it |
+| `None` | the word is at an untested level (§4.1); `parse_buffer` decides at materialization |
+
+A concrete kind never gives `None`, and an untested level never gives `False`
+unless a known fact (`Length`, the checksum) proves it.
+
+**The reference parser.**
+
+- **null**: the checksums of `null` and `null\n` are `None` for every celltype
+  (`b""` for `bytes`). Only `null\n` is the canonical null. Accepted before the
+  tables below, for every celltype. Function pins and results apply their
+  stricter null boundary separately; HashType describes storage compatibility.
+- **bool**: the checksums of `true` and `false`, with or without a trailing
+  newline. Any other checksum is rejected.
+- **plain**: `orjson`. It rejects `NaN`, `Infinity` and numbers beyond the float
+  range, so every JSON number is finite; it returns integers beyond 64 bits as
+  floats.
+- **str**: parsed as `plain`. A string, a number or a boolean becomes
+  `str(value)`, so `42` is `"42"` and `true` is `"True"`. An object, an array or
+  null is rejected.
+- **int, float**: the buffer is at most 1000 bytes, and the value is numeric: a
+  number that isn't a boolean, or a string whose `float()` is finite. A `float` is
+  `float(value)`. An `int` is `int(value)`, or else `int(float(value))`, so `"42"`
+  is 42 and `4.5` is 4.
+
+The null and bool parsers are virtual: they work on the checksum and never fetch
+a buffer. The numeric check is made on the value, never on a stored flag, so
+`parse_buffer` doesn't depend on whether a HashType is known.
+
+**Concrete kinds.**
 
 | celltype | predicate |
 |---|---|
 | `bytes` | always True (lattice top) |
 | `text` | `UTF8` |
-| `yaml` / `ipython` / `python` | `UTF8` (may-be; validity checked at parse time) † |
-| `plain` | `Kind ≥ JSON_OBJECT` |
-| `str` | `Kind ∈ {JSON_STRING, JSON_NUMBER}`, or a bool/null constant |
-| `int` / `float` | `NUMERIC_SCALAR` |
-| `bool` | `checksum ∈ {CHECKSUM_TRUE, CHECKSUM_FALSE}` |
+| `yaml` / `ipython` / `python` | `UTF8` (validity checked at parse time) † |
+| `plain` | `JSON` |
+| `str` | `Kind ∈ {JSON_STRING, JSON_NUMBER}`, or a bool/null checksum |
+| `int` / `float` | `Length ≠ LONG ∧ NUMERIC_SCALAR` |
+| `bool` | the checksum is one of the bool checksums |
 | `binary` | `Kind == NUMPY` |
 | `mixed` | `¬RAW` (i.e. `Kind ∉ {RAW_BYTES, RAW_TEXT}`) |
-| `checksum` | `Kind == RAW_TEXT ∧ Length == EQ64` (may-be; all-hex test is value-level) ‡ |
+| `checksum` | `Kind ∈ {RAW_TEXT, JSON_NUMBER} ∧ Length == EQ64` (all-hex test is value-level) ‡ |
 
-† `yaml`/`ipython`/`python` **validity** is no longer classified (the Region-4
-flags were dropped, §4), so these report only the necessary `UTF8` condition;
-the exact check stays in `text_validation_celltype_cache`. A `SEMANTIC` code
-checksum is deserializable as its code celltype.
+`NUMERIC_SCALAR` means a finite number: a JSON number, or a JSON string whose
+`float()` is finite, so `"nan"`, `"inf"` and `"1e999"` don't get it. There is no
+integer bit: `int` and `float` accept exactly the same checksums. `true` and
+`false` are classified as `JSON_STRING` without `NUMERIC_SCALAR`; a non-canonical
+null such as ` null ` gets the same word, so HashType allows it as `str` and
+`parse_buffer` rejects it.
 
-‡ A `checksum` buffer is a bare 64-byte non-JSON UTF-8 digest
-(`Kind = RAW_TEXT ∧ Length = EQ64`); the bits give that necessary screen, the exact
-all-hex test stays value-level. Deep cells are separate celltypes (§9), not a
-form of `checksum`.
+**Untested levels.** "?" is `None`.
+
+| celltype | `UNTESTED` | `UTF8_UNTESTED` | `JSON_UNTESTED` |
+|---|---|---|---|
+| `bytes` | yes | yes | yes |
+| `text`, `python`, `ipython`, `yaml` | ? | yes † | yes † |
+| `plain`, `mixed` | ? | ? | yes |
+| `str` | ? (yes for a bool/null checksum) | ? (same) | ? (same) |
+| `int`, `float` | ? (no if `LONG`) | ? (no if `LONG`) | ? (no if `LONG`) |
+| `binary` | ? | no | no |
+| `checksum` | ? (no unless `EQ64`) | ? (no unless `EQ64`) | ? (no unless `EQ64`) ‡ |
+| `bool` | by checksum | by checksum | by checksum |
+
+A path step on an untested level is never rejected, because its capabilities
+(§7) are not yet known.
+
+† `yaml`/`ipython`/`python` **validity** is not classified (the Region-4 flags
+were dropped, §4), so these report only the necessary `UTF8` condition; the exact
+check stays in `text_validation_celltype_cache`. When it fails, `parse_buffer`
+raises `HashTypeValidationError`, exactly like a HashType failure. A `SEMANTIC`
+code checksum is deserializable as its code celltype.
+
+‡ A `checksum` buffer is the bare 64-byte hex digest. A digest with `a`–`f` is
+`RAW_TEXT`; one of only decimal digits is a `JSON_NUMBER`. The bits give that
+necessary screen; a non-hex value raises `HashTypeValidationError` at parse time,
+and a parsed value is a `Checksum` (§9). Deep cells are separate celltypes (§9),
+not a form of `checksum`.
 
 `mixed = ¬RAW` falls straight out: `NUMPY`, `SEAMLESS_MIXED`, and every `JSON_*`
 kind are mixed-deserializable; only `RAW_BYTES` (pure bytes) and `RAW_TEXT`
@@ -373,11 +465,20 @@ cached-checksum branch (that now comes from the Expression cache, §1):
 The actual resulting checksum, when it changes, is **not** returned here — it is
 `Expression(checksum, "", source, target).result` from `seamless.db`.
 
-**Totality changes the `?`/`None` budget.** Because `TypeBits` is total (§8),
-every `?`/`None` that `BufferInfo` returned because a *field was missing*
-disappears: `UTF8`, `Kind`, `DType`, `Rank` are always known. What stays `?` is
-only genuine *value-level* uncertainty — text-language validity, integer-vs-float
-canonicality, and the merged-dtype `binary→plain` ambiguity (§4.3).
+**Expression executes this table.** The conversion engine
+([`convert.py`](seamless/checksum/convert.py)) follows the categories below: a
+trivial conversion keeps the checksum, a reinterpretation keeps it once the
+target's parser accepts it, and a reformat follows its written rule. Path
+expressions still work on values. Trivial conversions, and conversions of a null
+or bool checksum, need no buffer.
+
+**The `?`/`None` budget.** Every `?`/`None` that `BufferInfo` returned because a
+*field was missing* is gone: a word either settles `Kind`, `DType` and `Rank`, or
+names its untested level. What stays `?` is genuine *value-level* uncertainty —
+text-language validity, the checksum all-hex test, and the merged-dtype
+`binary→plain` ambiguity (§4.3) — plus the untested levels: there, the
+reinterpretations follow §5's untested table, and the possible and value
+conversions are `?`, except a numeric target on a `LONG` buffer, which is `✗`.
 
 ### 6.1 The full table
 
@@ -400,15 +501,16 @@ preserving."
 **Trivial** — all `=` (checksum-preserving by definition):
 `text→bytes`, `ipython→text`, `python→text`, `python→ipython`, `yaml→text`,
 `plain→yaml`, `plain→bytes`, `binary→mixed`, `plain→mixed`, `str→plain`,
-`int→plain`, `float→plain`, `bool→plain`.
+`int→plain`, `float→plain`, `bool→plain`, `int↔float`, `int→str`, `float→str`,
+`bool→str`.
 
 **Forbidden** — all `✗`:
 `python→{yaml,int,float,bool}`, `ipython→{yaml,int,float,bool}`,
 `yaml→{python,ipython}`, `int→{python,ipython}`, `float→{python,ipython}`,
 `bool→{python,ipython}`.
 
-**Reinterpret** (target-validated; preserving whenever feasible). Totality
-decides all of these except the value-level validity triple:
+**Reinterpret** (target-validated; preserving whenever feasible). A concrete
+word decides all of these except the value-level validity triple:
 
 | pair | result |
 |---|---|
@@ -417,6 +519,9 @@ decides all of these except the value-level validity triple:
 | `text→yaml` / `text→ipython` / `text→python` | `?` — validity is value-level |
 | `mixed→binary` | `=` if `NUMPY` else `✗` |
 | `mixed→plain` | `=` if `JSON` else `✗` |
+| `plain→str` | `=` if `Kind ∈ {JSON_STRING, JSON_NUMBER}` or a bool/null checksum, else `✗` |
+| `plain→int/float`, `str→int/float` | `Length == LONG` → `✗`; `NUMERIC_SCALAR` → `=`; else `✗` † |
+| `plain→bool`, `str→bool` | `=` if a bool checksum, else `✗` |
 
 `text→{yaml,ipython,python}` stay `?`: code/YAML **validity** is out of scope
 (Region 4 dropped, §4), so the bits can neither confirm nor refute them — the
@@ -438,8 +543,6 @@ field-absent `?` `BufferInfo` did, because `UTF8`/`JSON`/`NUMPY` are always know
 | `str→text` | — | always `≠` (remove quotes) |
 | `yaml→plain` | — | always `≠` (re-dump as canonical JSON) |
 | `ipython→python` | — | always `≠` (expand magics) |
-| `int/float/bool→str` | — | always `≠` |
-| `int↔float`, `int↔bool`, `float↔bool` (6 pairs) | — | always `≠` † |
 
 `NUMPY_BYTES` already means "scalar dtype-`S` array" (`DType = NONNUMERIC`,
 `Rank = SCALAR`), so `binary→bytes`/`mixed→bytes` read it directly — the old
@@ -450,22 +553,14 @@ field-absent `?` `BufferInfo` did, because `UTF8`/`JSON`/`NUMPY` are always know
 
 | pair(s) | rule |
 |---|---|
-| `plain/mixed→str` | `Kind = JSON_STRING` → `=`; `Kind = JSON_NUMBER` (and bool/null constants) → `≠`; `Kind ∈ {JSON_OBJECT, JSON_ARRAY}` → `✗` |
-| `plain/mixed→float` | `Kind ∈ {JSON_OBJECT, JSON_ARRAY}` or `Length == LONG` → `✗`; `NUMERIC_SCALAR` → `≠`; else `✗` |
-| `plain/mixed→int` | as `→float`, but a feasible numeric is `?` (integrality of the value is value-level), not `≠` |
-| `str→int/float` | `Length == LONG` → `✗`; `NUMERIC_SCALAR` → `≠` † (`→int` stays `?` on integrality); else `✗` |
+| `mixed→str` | `Kind = JSON_STRING` → `=`; `Kind = JSON_NUMBER` (and bool/null constants) → `≠`; `Kind ∈ {JSON_OBJECT, JSON_ARRAY}` → `✗` |
+| `mixed→float` | `Kind ∈ {JSON_OBJECT, JSON_ARRAY}` or `Length == LONG` → `✗`; `NUMERIC_SCALAR` → `≠`; else `✗` |
+| `mixed→int` | as `→float`, but a feasible numeric is `?` (integrality of the value is value-level), not `≠` |
 | `binary→int/float` | `DType.NUMERIC ∧ Rank.SCALAR` → `≠`; otherwise `✗` |
 
-`bool`/`null` *targets* are decided by direct comparison against the three
-constant checksums (§4), plus numeric coercion (`number→bool` via
-`NUMERIC_SCALAR`); they need no per-pair bit logic. The reduced `Kind` no longer
-distinguishes integer-canonical from float-canonical JSON numbers, so the old
-`json_type == target → =` shortcut is gone — these pairs are `≠`/`?`, never the
-questionable preserving `True` (see the † note).
-
-`plain/mixed→str` is a gain over `convert_from_buffer_info`, which returns `None`
-for it (the `str` target skips its `int/float/bool` shortcut), whereas `Kind`
-decides it here.
+`bool` *targets* are decided by direct comparison against the bool checksums
+(§4), plus numeric coercion (`number→bool` via `NUMERIC_SCALAR`); they need no
+per-pair bit logic.
 
 **Values, non-checksum** (need the value or its cached Expression):
 
@@ -473,6 +568,7 @@ decides it here.
 |---|---|
 | `binary→plain` | `DType ∈ {NUMERIC, STRUCTURED}` → `≠` (`json_encode`); `DType = NONNUMERIC` → `?` (object would be `✗`, bytes-`S`/`U` `≠` — the merge can't tell, §4.3) |
 | `plain→binary` | `Kind = JSON_OBJECT` → `✗`; `Kind = JSON_NUMBER` (scalar → 0-d array) → `≠`; `Kind = JSON_ARRAY` → `?` (homogeneous-numeric no longer tracked — `JSON_NUMERIC_ARRAY` dropped); else `?` |
+| `int/float→bool`, `bool→int/float` | the value is converted, so the checksum changes (`≠`); whether a number converts to `bool` is value-level (`?`) |
 
 **Checksum** — *not* a blanket `?`. A `checksum` value is a single bare 64-hex-digit
 string, so its buffer is `Kind == RAW_TEXT ∧ Length == EQ64` (a digest with
@@ -495,15 +591,14 @@ for this base-celltype table (§9).
 - `conversion_chain[(A,C)] = B` → multi-hop `A→B→C`; `convertible_to` raises
   ("handled upstream"), exactly as `convert_from_buffer_info` does today.
 
-> **† Divergence from current `convert_from_buffer_info`.** Two families return
-> `True` (preserving) there but `≠`/`?` here:
-> (a) numeric reformats `int↔float` (and `number↔bool` via the constants);
-> (b) `str→int/float`. In both, the source buffer is reserialized — `3`→`3.0`,
-> `true`→`1`, the quoted `"3"`→`3` — so the checksum changes; `True` was only
-> valid when the source buffer already equalled the target's canonical buffer.
-> The reduced `Kind` (no int-vs-float split) deliberately drops the bit that
-> would confirm that match, so the questionable `True` is no longer reachable —
-> the reduction *enforces* the caution the old code only documented.
+> **† Scalars keep the checksum.** An earlier version of this table gave
+> `int↔float`, `int/float/bool→str` and `plain/str→int/float` as `≠`/`?`,
+> because it assumed the source buffer is re-serialized (`3`→`3.0`, `"3"`→`3`).
+> Under the reference parser (§5) nothing is re-serialized: `int` and `float`
+> accept the same checksums, and both are subtypes of `str` (§2). So these
+> conversions keep the checksum, and the value comes from the target's parser:
+> `3` read as `float` is `3.0`, and `"3"` read as `int` is 3. Only the
+> conversions between `bool` and a number still change the checksum.
 
 ## 7. Method 3 — expression capability (Role 4)
 
@@ -601,32 +696,53 @@ dict/list, so its buffer's `Kind` is already `JSON_OBJECT`/`JSON_ARRAY`
 (→ MAP/SEQ) and its deep-vs-plain identity (a celltype fact, §9) is irrelevant to
 capability.
 
-## 8. Totality — no partial definition, and the two fill procedures
+## 8. Untested levels, tightening, and the two fill procedures
 
-### 8.1 The completeness invariant
+### 8.1 Information only grows
 
 `BufferInfo` permitted every field to be `None`: a value could be
 half-classified, and queries returned `None`/`?` whenever a field they needed
-happened to be absent. `TypeBits` **forbids** this. A `TypeBits` is either
-*absent* (not yet computed for a checksum) or **total**: every field — `Kind`,
-`Length`, `DType`, `Rank`, and all four flags — holds a definite value.
-"Not applicable" is itself a definite value (`DType.NA`, `Rank.SCALAR` for
-non-arrays, the flags `False`), never a stand-in for "unknown". It is computed
-**once, when the checksum is first computed** (§8.4) — where the buffer is always
-in hand and a typed value usually is. There is no setter that fills one field and
-leaves another open; a `TypeBits` is produced whole, each field drawn from its
-cheapest authoritative source (§8.3–8.4) and stored only once *confirmed*, never as
-a guess (§8.6).
+happened to be absent. `TypeBits` **forbids** that. A `TypeBits` is either
+*absent* (not yet computed for a checksum) or a word in one of two forms:
 
-The payoff is §6's collapsed `?` budget: the only residual `?`/`None` are
-genuinely value-level, never field-absence.
+- **Concrete**: every field — `Kind`, `Length`, `DType`, `Rank`, and all flags —
+  holds a definite value. "Not applicable" is itself a definite value
+  (`DType.NA`, `Rank.SCALAR` for non-arrays, the flags `False`), never a stand-in
+  for "unknown".
+- **Untested level** (§4.1): `Length` is known, and the kind says explicitly how
+  far the buffer was tested: nothing, UTF-8, or JSON. A producer may store such a
+  word instead of testing further, for example "UTF-8" without testing for JSON.
+  It never causes a rejection that the buffer wouldn't (§5).
+
+So a word is never a guess: every fact it states was tested.
+
+**A stored word can only be tightened.** A word is tighter when it implies the
+stored word, for example `JSON_OBJECT` replacing `JSON_UNTESTED`.
+
+- A tighter write replaces the stored word.
+- An equal or looser write changes nothing.
+- A contradictory write is a conflict: it is logged, raises `ValueError`, and keeps
+  the stored word. That includes a disagreement about `Length` or
+  `NUMERIC_SCALAR`, or between two concrete words. A word is a function of the
+  buffer, so correct producers never contradict each other; only a bug, or a change
+  in the classification rules, can.
+
+The local cache (`set_hash_type`) follows this rule. The database must follow it
+too; today it rejects every differing word (celltype-rename review decisions
+§10.6).
+
+Consequences: information only grows, so a stored "can't be deserialized" fact is
+never erased. A wrong stored word can't be repaired by writing a correct one,
+because that write conflicts. So when the classification rules change — including
+any change in what the reference parser (§5) accepts, such as an `orjson`
+upgrade — the `hash_type` table, which is a cache, must be cleared.
 
 ### 8.2 The most-informative celltype (MIC)
 
 The celltypes a buffer deserializes as form an up-set in the lattice (§2); its
 **minimum** — the most specific celltype — carries the most structure. The MIC is
-a **total function of `Kind`**: every one of the nine `Kind`s has exactly one MIC,
-and a buffer has exactly one `Kind`, so look up the row and stop — never a priority
+a **total function of `Kind`**: every one of the twelve `Kind`s has exactly one MIC,
+and a word has exactly one `Kind`, so look up the row and stop — never a priority
 scan, never a tie.
 
 Each `Kind` needs only **one** MIC. The two scalar cases that looked like
@@ -645,6 +761,9 @@ actually needed.
 | `JSON_OBJECT`/`JSON_ARRAY` | `plain` | container ⟹ `NUMERIC_SCALAR = False` |
 | `JSON_STRING` | `str` | `NUMERIC_SCALAR ← float(value)` probe |
 | `JSON_NUMBER` | `float` | `NUMERIC_SCALAR = True` |
+| `UNTESTED` | `bytes` | — |
+| `UTF8_UNTESTED` | `text` | — |
+| `JSON_UNTESTED` | `plain` | — |
 
 The three `bool`/`null` constants are recognised by checksum and carry
 pre-tabulated `TypeBits` (§4) — they need no MIC.
@@ -706,7 +825,7 @@ JSON family and the `RAW_TEXT`-vs-`RAW_BYTES` split.
   `Kind` has a single MIC (§8.2), so this is **one** deserialization; a
   `JSON_STRING`'s `NUMERIC_SCALAR` rides on that same `str` via `float(value)`.
 
-Putting §8.3 and this together, a total `TypeBits` is filled by a per-field race to
+Putting §8.3 and this together, a concrete `TypeBits` is filled by a per-field race to
 the cheapest authoritative source, run once:
 
 1. `Length`, the magic kinds, the numpy sub-fields, and the `not-JSON → RAW`
@@ -731,39 +850,41 @@ Either way the field is definite — totality holds.
 
 ### 8.6 Agreement
 
-The peek and the value are two sources for the same total `TypeBits`; where both
+The peek and the value are two sources for the same concrete `TypeBits`; where both
 can settle a field they must agree — the natural correctness test (a cheap audit:
 re-peek a stored `TypeBits`'s buffer and compare). Two consequences sharpen "no
 partial definition":
 
 - A field is always filled by the *cheapest source that can settle it* — never left
   open, but also never stored as a **guess**. The peek's JSON *candidate* (§8.3) is
-  promoted to a stored `Kind` only once a value or an `O(n)` parse confirms it; an
-  unconfirmed candidate is not yet a `TypeBits`.
+  promoted to a stored `Kind` only once a value or an `O(n)` parse confirms it. An
+  unconfirmed candidate may be stored only at the untested level that *was*
+  confirmed (§8.1): `UTF8_UNTESTED` once the bytes are known to be UTF-8, otherwise
+  `UNTESTED` — never `JSON_UNTESTED`, which asserts that the buffer is JSON.
 - A `TypeBits` whose `Kind` disagrees with a re-peek of its own buffer is, by
   definition, ill-formed.
 
 ## 9. `checksum` celltype
 
-A `checksum` *value* is a single 64-hex-digit string
-([`checksum_class.py`](../checksum_class.py) `.hex()` — a 32-byte digest). Its
-buffer is therefore a bare, non-JSON UTF-8 string of exactly that length:
-`Kind == RAW_TEXT ∧ Length == EQ64` (a digest containing `a`–`f` does not parse
-as JSON). This is exactly why §4.3 spends an exact bucket on 64. So `checksum` is
-a real may-be predicate, not a blanket out-of-scope `?`:
+A `checksum` *value* is a `Checksum` object; its buffer is the bare 64-hex-digit
+string ([`checksum_class.py`](../checksum_class.py) `.hex()` — a 32-byte digest),
+without quotes. That buffer is UTF-8 of exactly that length. A digest containing
+`a`–`f` does not parse as JSON, so it is `RAW_TEXT`; a digest of only decimal
+digits is a `JSON_NUMBER`. This is exactly why §4.3 spends an exact bucket on 64.
+So `checksum` is a real may-be predicate, not a blanket out-of-scope `?`:
 
-- `deserializable_as(checksum)` → may-be when `Kind == RAW_TEXT ∧ Length == EQ64`;
-  the residual "are all 64 characters hex digits?" test is value-level, in the same
-  spirit as text-language validity (§5). Otherwise `✗`.
+- `deserializable_as(checksum)` → may-be when
+  `Kind ∈ {RAW_TEXT, JSON_NUMBER} ∧ Length == EQ64`; the residual "are all 64
+  characters hex digits?" test is value-level, in the same spirit as
+  text-language validity (§5), and a failure raises `HashTypeValidationError`.
+  Otherwise `✗`.
 - `convertible_to(·, checksum)` / `convertible_to(checksum, ·)` are screened by the
   same predicate (§6.1): `✗` when a buffer cannot be a 64-hex digest, `?` once it
   passes, with the result checksum recovered as an Expression (§1).
 
 What stays out of scope is only the *sufficient* hex validation — never the
-necessary screen the bits now provide. This matches today's `validate_buffer_info`,
-which already requires `is_utf8` for `checksum` and rejects dict/list/number
-buffers; `TypeBits` adds the `Kind == RAW_TEXT ∧ Length == EQ64` half `BufferInfo`
-left implicit.
+necessary screen the bits now provide. `BufferInfo` required only `is_utf8` for
+`checksum`; `TypeBits` adds the `Kind` and `Length == EQ64` half it left implicit.
 
 **Deep cells are not `checksum`.** A deep cell (`deepcell`, `deepfolder`, `folder`,
 `module`) is a *distinct, explicit* celltype in Seamless 1.x — not a "dict/list
@@ -780,8 +901,8 @@ of scope here just as the deep celltypes are absent from `conversion.py`'s
 
 | `BufferInfo` field | becomes |
 |---|---|
-| `is_utf8` | **derived** `Kind ≥ RAW_TEXT` — no stored flag; the `RAW_BYTES`/`RAW_TEXT` split + JSON kinds supply it (§4.1) |
-| `is_json` | `Kind ≥ JSON_OBJECT` |
+| `is_utf8` | **derived** by membership: `RAW_TEXT`, the JSON kinds, `UTF8_UNTESTED`, `JSON_UNTESTED` — no stored flag (§4.1) |
+| `is_json` | membership: the JSON kinds and `JSON_UNTESTED` |
 | `json_type` | `Kind` (`JSON_OBJECT`..`JSON_NUMBER`, 5–8); `bool`/`null` via the three checksum constants (§4) |
 | `is_json_numeric_scalar` | `Flag.NUMERIC_SCALAR` |
 | `is_json_numeric_array` | **dropped** (saved little) |
@@ -796,7 +917,7 @@ of scope here just as the deep celltypes are absent from `conversion.py`'s
 | `str2text`, `text2str`, `bytes2binary`, `binary2json`, `json2binary` | **removed** — empty-path Expressions in `seamless.db`, keyed `(checksum, "", source, target)` |
 | yaml/ipython/python validity (`text_validation_celltype_cache`) | **not ported** — stays where it is (out of scope) |
 | *(new)* `SEMANTIC` | AST-identity of code (§4.2), provenance (§8.5) |
-| *(new invariant)* any-field-`None` | **forbidden** — `TypeBits` is total (§8); the `None`-from-missing-field branches collapse |
+| *(new invariant)* any-field-`None` | **forbidden** — a word is concrete or names its untested level (§8.1); the `None`-from-missing-field branches collapse |
 
 `validate_buffer_info` / `verify_buffer_info` / `convert_from_buffer_info`
 collapse into queries over `TypeBits` (§§5–7) plus Expression-cache lookups —
@@ -810,6 +931,7 @@ from enum import IntEnum, IntFlag
 class Kind(IntEnum):
     RAW_BYTES = 0; NUMPY = 1; MIXED_OBJECT = 2; MIXED_ARRAY = 3; RAW_TEXT = 4
     JSON_OBJECT = 5; JSON_ARRAY = 6; JSON_STRING = 7; JSON_NUMBER = 8
+    UNTESTED = 9; UTF8_UNTESTED = 10; JSON_UNTESTED = 11
 
 class Length(IntEnum):
     SHORT = 0; EQ64 = 1; MEDIUM = 2; LONG = 3
@@ -823,33 +945,47 @@ class Rank(IntEnum):
 class Flag(IntFlag):
     NUMERIC_SCALAR = 1 << 0; NUMPY_BYTES = 1 << 1; SEMANTIC = 1 << 2
 
-def UTF8(k):  return k >= Kind.RAW_TEXT         # derived; RAW_TEXT and every JSON_*
+UNTESTED_KINDS = {Kind.UNTESTED, Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED}
+JSON_KINDS = {Kind.JSON_OBJECT, Kind.JSON_ARRAY, Kind.JSON_STRING, Kind.JSON_NUMBER}
+def JSON(k):  return k in JSON_KINDS | {Kind.JSON_UNTESTED}
+def UTF8(k):  return JSON(k) or k in (Kind.RAW_TEXT, Kind.UTF8_UNTESTED)
 
-# the three singleton buffers — bool/null need no bit, but get a total TypeBits
-CHECKSUM_TRUE  = checksum_of(b"true\n")
-CHECKSUM_FALSE = checksum_of(b"false\n")
-CHECKSUM_NULL  = checksum_of(b"null\n")
+# bool/null need no bit: their checksums, with and without a trailing newline
+NULL_CHECKSUMS = {checksum_of(b"null\n"), checksum_of(b"null")}
+BOOL_CHECKSUMS = {checksum_of(b) for b in (b"true\n", b"true", b"false\n", b"false")}
 
 
-def deserializable_as(ti, checksum, celltype: str) -> bool:
-    if checksum == CHECKSUM_NULL: return True  # storage, not function boundary
+def deserializable_as(ti, checksum, celltype: str) -> bool | None:
+    if checksum in NULL_CHECKSUMS: return True  # storage, not function boundary
     k = ti.kind
+    long = ti.length == Length.LONG
     if celltype == "bytes":  return True
-    if celltype == "text":   return UTF8(k)
-    if celltype in ("yaml", "ipython", "python"):
-        return UTF8(k)                          # may-be; validity checked at parse time
-    if celltype == "plain":  return k >= Kind.JSON_OBJECT
+    if celltype == "bool":   return checksum in BOOL_CHECKSUMS
+    if k in UNTESTED_KINDS:                     # None = not tested; never a guess
+        if celltype in ("text", "yaml", "ipython", "python"):
+            return True if UTF8(k) else None
+        if celltype in ("plain", "mixed"):
+            return True if JSON(k) else None
+        if celltype == "str":
+            return True if checksum in BOOL_CHECKSUMS else None
+        if celltype in ("int", "float"):
+            return False if long else None
+        if celltype == "binary":
+            return None if k == Kind.UNTESTED else False
+        if celltype == "checksum":
+            return None if ti.length == Length.EQ64 else False  # JSON is no proof (‡)
+        return False
+    if celltype in ("text", "yaml", "ipython", "python"):
+        return UTF8(k)                          # validity checked at parse time
+    if celltype == "plain":  return JSON(k)
     if celltype == "str":
-        return k in (Kind.JSON_STRING, Kind.JSON_NUMBER) or \
-               checksum in (CHECKSUM_TRUE, CHECKSUM_FALSE, CHECKSUM_NULL)
+        return k in (Kind.JSON_STRING, Kind.JSON_NUMBER) or checksum in BOOL_CHECKSUMS
     if celltype in ("int", "float"):
-        return bool(ti.flag & Flag.NUMERIC_SCALAR)
-    if celltype == "bool":
-        return checksum in (CHECKSUM_TRUE, CHECKSUM_FALSE)
+        return not long and bool(ti.flags & Flag.NUMERIC_SCALAR)
     if celltype == "binary": return k == Kind.NUMPY
     if celltype == "mixed":  return k not in (Kind.RAW_BYTES, Kind.RAW_TEXT)
     if celltype == "checksum":                  # single-checksum screen (§9)
-        return k == Kind.RAW_TEXT and ti.length == Length.EQ64
+        return k in (Kind.RAW_TEXT, Kind.JSON_NUMBER) and ti.length == Length.EQ64
     return False
 
 
@@ -873,10 +1009,11 @@ def capabilities(ti, source) -> set[str]:       # §7 — relative to source_cel
 
 ## 12. Enumeration of the valid `TypeBits`
 
-The raw field cross-product (`9 × 4 × 4 × 4 × 2 × 2 × 2`) is mostly unreachable;
+The raw field cross-product (`12 × 4 × 4 × 4 × 2 × 2 × 2`) is mostly unreachable;
 the **cross-field invariants** below define which words are valid. They are the
-well-formedness predicate an implementation should assert (it is exactly "this
-`TypeBits` equals the peek of *some* buffer").
+well-formedness predicate an implementation should assert. For a concrete kind it
+is exactly "this `TypeBits` equals the peek of *some* buffer"; an untested level is
+a valid prefix of such a peek (§8.1).
 
 **Invariants** (a `TypeBits` is valid iff all hold):
 
@@ -885,12 +1022,15 @@ well-formedness predicate an implementation should assert (it is exactly "this
 - `NUMPY_BYTES  ⟹  Kind == NUMPY ∧ DType == NONNUMERIC ∧ Rank == SCALAR`.
 - `Kind == JSON_NUMBER  ⟹  NUMERIC_SCALAR`; and `NUMERIC_SCALAR  ⟹  Kind ∈ {JSON_NUMBER, JSON_STRING}`.
 - `SEMANTIC  ⟹  Kind == RAW_TEXT`.
-- `UTF8` is derived (`Kind ≥ RAW_TEXT`), never independent.
+- `UTF8` and `JSON` are derived by membership (§4.1), never independent.
 - `Length` is free per the §12.2 reachability rule.
+
+The invariants already force an untested kind to `DType = NA`, `Rank = SCALAR` and
+no flags.
 
 ### 12.1 Structural witness classes
 
-Holding `Length` aside (§12.2), the invariants leave **26** structural classes.
+Holding `Length` aside (§12.2), the invariants leave **29** structural classes.
 Each row is one distinct `TypeBits`, with a buffer (or a snippet that builds one);
 `np`/`Buffer` are `numpy` / `seamless.Buffer`. `NUM`/`NB`/`SEM` =
 `NUMERIC_SCALAR`/`NUMPY_BYTES`/`SEMANTIC` (blank = `False`).
@@ -923,6 +1063,12 @@ Each row is one distinct `TypeBits`, with a buffer (or a snippet that builds one
 | 24 | *(const)* | — | — | — | — | — | `b"true\n"` → `CHECKSUM_TRUE`, pre-tabulated (§4) |
 | 25 | *(const)* | — | — | — | — | — | `b"false\n"` → `CHECKSUM_FALSE` |
 | 26 | *(const)* | — | — | — | — | — | `b"null\n"` → `CHECKSUM_NULL` |
+| 27 | `UNTESTED` | NA | SCALAR | | | | any buffer, stored before any test (§8.1) |
+| 28 | `UTF8_UNTESTED` | NA | SCALAR | | | | any UTF-8 buffer, stored before the JSON test |
+| 29 | `JSON_UNTESTED` | NA | SCALAR | | | | any JSON buffer, stored before its JSON type is tested |
+
+Rows 24–26 cover the canonical buffers; `true`, `false` and `null` without a
+trailing newline are recognized by checksum too (§5).
 
 Rows that the invariants make **unreachable** (worth stating, since they are the
 common bugs): `DType`/`Rank ≠ NA`/`SCALAR` with a non-`NUMPY` `Kind`; `NUMPY_BYTES`
@@ -939,18 +1085,21 @@ Each structural class is multiplied by the `Length` buckets its buffer can take:
 | `NUMPY` | `MEDIUM` / `LONG` | the `.npy` header alone pads past 64 bytes, so never `SHORT`/`EQ64` |
 | `MIXED_*` | `SHORT` (tiny) / `MEDIUM` / `LONG` | magic + skeleton; `EQ64` only by coincidence |
 | `JSON_OBJECT`/`ARRAY`/`STRING` | `SHORT` … `LONG` | any size ≥ 2 |
-| `JSON_NUMBER` | `SHORT` … `LONG` | `LONG` (>1000 digits) is valid but **forbids** numeric conversion (§6) |
-| `bool`/`null` consts | fixed (`SHORT`) | the three buffers are 5/6/5 bytes |
+| `JSON_NUMBER` | `SHORT` … `LONG` | `LONG` (>1000 characters) is valid but **forbids** numeric conversion (§6) |
+| untested kinds | `SHORT` … `LONG` | any size |
+| `bool`/`null` consts | fixed (`SHORT`) | 4–6 bytes, with or without the newline |
 
 Two `Length` witnesses the design leans on:
 
 - **`RAW_TEXT ∧ EQ64`** — a 64-byte UTF-8 non-JSON string: precisely a `checksum`
   digest (`Checksum.hex()`), the §9 screen.
-- **`JSON_NUMBER ∧ LONG`** — e.g. `b"1" + b"0"*2000`: a valid `JSON_NUMBER` whose
-  `Length == LONG` flips every `→int/float` conversion to `✗` (§6.1).
+- **`JSON_NUMBER ∧ LONG`** — e.g. `b"0." + b"1" * 1000`: a valid `JSON_NUMBER`
+  whose `Length == LONG` flips every `→int/float` conversion to `✗` (§6.1). It must
+  be a finite decimal: `orjson` rejects a number beyond the float range, such as
+  `b"1" + b"0" * 2000`, so that buffer is `RAW_TEXT`.
 
 Summing the structural classes over their reachable `Length` buckets gives on the
-order of **70** distinct valid `TypeBits` words — out of the 4608 the raw bit
+order of **80** distinct valid `TypeBits` words — out of the 6144 the raw bit
 ranges could spell, the rest excluded by §12's invariants.
 
 ## 13. Deferred / open items
@@ -968,3 +1117,5 @@ ranges could spell, the rest excluded by §12's invariants.
   accepted**, as `binary→plain` is rare. The 3 spare bits of the word leave room
   for a fourth `DType` value (or a second refinement flag alongside `NUMPY_BYTES`)
   should that ever stop being true — no escape hatch is needed now.
+- **Tightening in the database** — the database still rejects every differing
+  word as a conflict; accepting a tighter word is pending (§8.1).

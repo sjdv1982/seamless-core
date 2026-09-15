@@ -470,9 +470,8 @@ def deserializable_as(
         if celltype == "binary":
             return None if kind == Kind.UNTESTED else False
         if celltype == "checksum":
-            if ti.length != Length.EQ64 or kind == Kind.JSON_UNTESTED:
-                return False
-            return None
+            # A digest of only decimal digits is a JSON number, so JSON is no proof.
+            return None if ti.length == Length.EQ64 else False
         return False
     if celltype in ("text", "yaml", "ipython", "python"):
         return ti.is_utf8

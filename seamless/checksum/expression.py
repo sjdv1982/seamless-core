@@ -68,9 +68,11 @@ def choose_expression_evaluation_location(
     ):
         return "local"
 
+    from seamless import CacheMissError
+
     try:
         _get_local_buffer(key.input_checksum)
-    except ExpressionEvaluationError:
+    except CacheMissError:
         return "remote"
     return "local"
 
@@ -432,7 +434,18 @@ def resolve_expression_value(
     result_checksum: Checksum | str | bytes,
     celltype: str,
 ) -> Any:
-    buffer = _get_local_buffer(Checksum(result_checksum))
+    """Materialize a result like ``.value``: local buffers, then ``Checksum.resolve()``.
+
+    ``resolve()`` also asks the hashserver, so a result computed elsewhere
+    materializes; it raises ``CacheMissError`` when no buffer is found.
+    """
+    from seamless import CacheMissError
+
+    checksum = Checksum(result_checksum)
+    try:
+        buffer = _get_local_buffer(checksum)
+    except CacheMissError:
+        buffer = checksum.resolve()
     return _deserialize_for_expression(buffer, celltype)
 
 
@@ -484,8 +497,10 @@ def _cache_key(key: ExpressionKey) -> tuple[str, str, str, str]:
 def _local_buffer_getter(checksum: Checksum) -> Callable[[], Buffer]:
     """Keep one local buffer lookup lazy and retain its result for evaluation."""
 
+    from seamless import CacheMissError
+
     buffer: Buffer | None = None
-    error: ExpressionEvaluationError | None = None
+    error: CacheMissError | None = None
 
     def get_buffer() -> Buffer:
         nonlocal buffer, error
@@ -494,7 +509,7 @@ def _local_buffer_getter(checksum: Checksum) -> Callable[[], Buffer]:
         if buffer is None:
             try:
                 buffer = _get_local_buffer(checksum)
-            except ExpressionEvaluationError as exc:
+            except CacheMissError as exc:
                 error = exc
                 raise
         return buffer
@@ -522,9 +537,9 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     if raw is not None:
         return Buffer(raw, checksum=checksum)
 
-    raise ExpressionEvaluationError(
-        f"Buffer for checksum {checksum.hex()} is not available locally"
-    )
+    from seamless import CacheMissError
+
+    raise CacheMissError(checksum)
 
 
 def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:

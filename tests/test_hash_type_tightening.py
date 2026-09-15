@@ -59,7 +59,7 @@ def test_untested_encoding_and_membership(kind, number, utf8, json, mic):
     ("int", (None, None, None)),
     ("float", (None, None, None)),
     ("binary", (None, False, False)),
-    ("checksum", (None, None, False)),
+    ("checksum", (None, None, None)),
     ("bool", (False, False, False)),
 ])
 def test_three_outcome_deserialization(kind, celltype, outcomes):
