@@ -132,6 +132,7 @@ class BufferCache:
         - buffer: object to store (can be any Python object)
         - size: optional length in bytes. If None, treated as unknown (infinite cost)
         """
+        write_buffer = None
         with self.lock:
             if size is None:
                 size = getattr(buffer, "length", None)
@@ -148,9 +149,11 @@ class BufferCache:
             if entry is not None:
                 if buffer is not None and entry.buffer is None:
                     if entry.remote_registered:
-                        buffer_writer.register(buffer)
+                        write_buffer = buffer
                 entry.buffer = buffer
                 entry.size = size
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
 
     def get(self, checksum: Checksum) -> Optional[Buffer]:
         """Return buffer if present in strong or weak caches (promotes to strong if refs exist)."""
@@ -175,9 +178,15 @@ class BufferCache:
         *,
         buffer: Optional[Buffer] = None,
         scratch: bool = False,
-    ) -> StrongEntry:
-        """Return a strong entry, creating/adopting it under ``self.lock``."""
+    ) -> tuple[StrongEntry, Optional[Buffer]]:
+        """Return the entry and any buffer to register after releasing the lock.
 
+        Writer registration may import modules being imported by a thread whose
+        GC finalizers need this lock. Complete reference accounting first, then
+        register outside the lock to avoid that lock cycle.
+        """
+
+        write_buffer = None
         write_remote = not scratch
         if buffer is None:
             buffer = self.weak_cache.get(checksum)
@@ -195,19 +204,19 @@ class BufferCache:
             entry = StrongEntry(buffer=buffer, size=size)
             entry.remote_registered = write_remote
             if buffer is not None and write_remote:
-                buffer_writer.register(buffer)
+                write_buffer = buffer
             self.strong_cache[checksum] = entry
             eviction_cost.add_interest(checksum)
         elif entry.buffer is None and buffer is not None:
             entry.buffer = buffer
             if write_remote:
                 entry.remote_registered = True
-                buffer_writer.register(buffer)
+                write_buffer = buffer
         if write_remote and not entry.remote_registered:
             entry.remote_registered = True
             if entry.buffer is not None:
-                buffer_writer.register(entry.buffer)
-        return entry
+                write_buffer = entry.buffer
+        return entry, write_buffer
 
     def _has_live_tempref_locked(self, entry: StrongEntry) -> bool:
         if entry.tempref is None:
@@ -253,10 +262,12 @@ class BufferCache:
                 self._scratch_refs.add(checksum)
             else:
                 self._scratch_refs.discard(checksum)
-            entry = self._ensure_entry_locked(
+            entry, write_buffer = self._ensure_entry_locked(
                 checksum, buffer=buffer, scratch=scratch
             )
             entry.manual_refs += 1
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
 
     def decref(self, checksum: Checksum) -> bool:
         """Decrement a normal refcount and report whether one was held."""
@@ -286,13 +297,15 @@ class BufferCache:
                 self._scratch_refs.add(checksum)
             else:
                 self._scratch_refs.discard(checksum)
-            entry = self._ensure_entry_locked(
+            entry, write_buffer = self._ensure_entry_locked(
                 checksum, buffer=buffer, scratch=scratch
             )
             count = self.refholder_counts.get(checksum, 0)
             if count == 0:
                 entry.has_refholder_bridge = True
             self.refholder_counts[checksum] = count + 1
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
 
     def decref_refholder(self, checksum: Checksum) -> bool:
         """Release one logical lifecycle reference for ``checksum``."""
@@ -366,7 +379,7 @@ class BufferCache:
                 self._scratch_refs.add(checksum)
             else:
                 self._scratch_refs.discard(checksum)
-            entry = self._ensure_entry_locked(
+            entry, write_buffer = self._ensure_entry_locked(
                 checksum, buffer=buffer, scratch=scratch
             )
             if entry.tempref is None:
@@ -388,6 +401,8 @@ class BufferCache:
                     entry.tempref.fade_interval = fade_interval
                 entry.tempref.refresh()
                 entry.tempref_scratch = scratch
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
         return entry.tempref
 
     def purge_scratch(self, checksum: Checksum | None = None) -> int:
