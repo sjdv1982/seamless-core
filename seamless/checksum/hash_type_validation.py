@@ -197,8 +197,8 @@ def conversion_feasible(
 ) -> bool | None:
     """Return False only when HashType proves conversion impossible."""
 
-    from .null import is_null
-    if is_null(checksum):
+    from .null import is_null_value
+    if is_null_value(checksum):
         return True
     hash_type = hash_type if isinstance(hash_type, HashType) else HashType.unpack(hash_type)
     if source_celltype == target_celltype:
@@ -214,7 +214,7 @@ def conversion_feasible(
     if conv in conversion_trivial or conv in conversion_reformat:
         return True
     if conv in conversion_reinterpret:
-        return hash_type.deserializable_as(target_celltype)
+        return hash_type.deserializable_as(target_celltype, checksum=checksum)
     if conv in conversion_possible:
         return _possible_conversion_feasible(hash_type, source_celltype, target_celltype)
     if conv in conversion_values:
@@ -280,7 +280,7 @@ def _possible_conversion_feasible(
         if source_celltype == "binary":
             return hash_type.dtype.name == "NUMERIC" and hash_type.rank.name == "SCALAR"
         return True if hash_type.is_json_numeric_scalar else False
-    if target_celltype == "str" and source_celltype in ("plain", "mixed"):
+    if target_celltype == "str" and source_celltype == "mixed":
         if hash_type.kind.name in ("JSON_OBJECT", "JSON_ARRAY"):
             return False
         return True

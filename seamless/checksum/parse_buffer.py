@@ -1,10 +1,9 @@
 """Functions to parse a buffer into a value"""
 
-import builtins
 import logging
 from copy import deepcopy
-import json
 import ast
+import math
 import orjson
 import yaml
 from seamless import Buffer, Checksum
@@ -13,6 +12,7 @@ from seamless.util.get_event_loop import get_event_loop
 from seamless.util.ipython import ipython2python
 from ..util import lrucache2
 from .celltypes import celltypes, text_types2
+from .virtual import NOT_VIRTUAL, virtual_value
 
 from .serialize import serialize_cache
 
@@ -32,12 +32,61 @@ def _parse_buffer_plain(buffer):
     s = s.rstrip("\n")
     try:
         value = orjson.loads(s)
-    except json.JSONDecodeError:
+    except orjson.JSONDecodeError:
         msg = s
         if len(msg) > 1000:
             msg = s[:920] + "..." + s[-50:]
         raise ValueError(msg) from None
     return value
+
+
+def _parse_scalar(buffer: Buffer, celltype: str):
+    """Parse a JSON scalar according to the checksum reference contract."""
+
+    if celltype in ("int", "float") and len(buffer) > 1000:
+        raise ValueError("Numeric scalar buffer is longer than 1000 bytes")
+
+    # ``_parse_buffer_plain`` deliberately uses orjson, so numeric JSON is
+    # interpreted in the same way as the HashType producer and conversion
+    # engine.  In particular, large unquoted JSON integers become floats.
+    value = _parse_buffer_plain(buffer)
+
+    if celltype == "str":
+        if value is None or isinstance(value, (dict, list)):
+            raise ValueError("JSON value cannot be interpreted as str")
+        if isinstance(value, (str, int, float, bool)):
+            return str(value)
+        raise ValueError("JSON value cannot be interpreted as str")
+
+    if celltype == "bool":
+        # Canonical boolean buffers are handled by ``virtual_value`` before
+        # this function is reached.  No content-based coercion is permitted.
+        raise ValueError("checksum does not encode a boolean value")
+
+    if isinstance(value, str):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("JSON string is not a finite number") from None
+        if not math.isfinite(numeric_value):
+            raise ValueError("JSON string is not a finite number")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("JSON number is not finite")
+    else:
+        raise ValueError("JSON value is not a number")
+
+    if celltype == "float":
+        return float(value)
+
+    assert celltype == "int"
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as original_error:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            raise original_error from None
 
 
 def validate_text(text: str, celltype: str, code_filename):
@@ -84,9 +133,9 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     if celltype not in celltypes:
         raise TypeError(celltype)
     checksum = Checksum(checksum)
-    from .null import is_null
-    if is_null(checksum):
-        return b"" if celltype == "bytes" else None
+    value = virtual_value(checksum, celltype)
+    if value is not NOT_VIRTUAL:
+        return value
     logger.debug(
         "DESERIALIZE: buffer of length {}, checksum {}".format(len(buffer), checksum)
     )
@@ -111,9 +160,7 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     elif celltype == "bytes":
         value = buffer
     elif celltype in ("str", "int", "float", "bool"):
-        value = _parse_buffer_plain(buffer)
-        if not isinstance(value, getattr(builtins, celltype)):
-            value = getattr(builtins, celltype)(value)
+        value = _parse_scalar(buffer, celltype)
     elif celltype == "checksum":
         try:
             value = buffer.decode()

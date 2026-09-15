@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 import ast
 import asyncio
 import concurrent.futures
@@ -53,11 +54,22 @@ def get_expression_cache() -> dict[tuple[str, str, str, str], Checksum]:
 
 def choose_expression_evaluation_location(
     input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
 ) -> str:
-    """Return "local" when expression input data is available locally, else "remote"."""
+    """Choose local evaluation when conversion needs no unavailable buffer."""
+
+    from .convert import conversion_needs_buffer
+
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    if not path and not conversion_needs_buffer(
+        key.input_checksum, key.input_celltype, key.celltype
+    ):
+        return "local"
 
     try:
-        _get_local_buffer(Checksum(input_checksum))
+        _get_local_buffer(key.input_checksum)
     except ExpressionEvaluationError:
         return "remote"
     return "local"
@@ -86,8 +98,9 @@ def evaluate_expression(
         _publish_expression_result(cached)
         return cached
 
-    input_buffer = _get_local_buffer(key.input_checksum)
     steps = parse_path(key.path)
+    get_buffer = _local_buffer_getter(key.input_checksum)
+    input_buffer = get_buffer() if steps else None
     from .hash_type_validation import validate_expression
 
     validate_expression(
@@ -97,7 +110,9 @@ def evaluate_expression(
         path_steps=steps,
         target_celltype=key.celltype,
     )
-    return _evaluate_expression_after_validation(key, input_buffer, steps, cache_key)
+    return _evaluate_expression_after_validation(
+        key, input_buffer, steps, cache_key, get_buffer
+    )
 
 
 async def evaluate_expression_async(
@@ -121,9 +136,26 @@ async def evaluate_expression_async(
         _publish_expression_result(cached)
         return cached
 
-    input_buffer = _get_local_buffer(key.input_checksum)
     steps = parse_path(key.path)
+    from .convert import conversion_needs_buffer
     from .hash_type_validation import validate_expression_async
+    from .null import canonicalize_checksum, is_null
+
+    needs_buffer = bool(steps)
+    if not steps and key.input_celltype != key.celltype and not is_null(
+        canonicalize_checksum(key.input_checksum, key.celltype)
+    ):
+        needs_buffer = conversion_needs_buffer(
+            key.input_checksum, key.input_celltype, key.celltype
+        )
+    input_buffer = await key.input_checksum.resolution() if needs_buffer else None
+
+    def get_buffer() -> Buffer:
+        if input_buffer is None:
+            raise ExpressionEvaluationError(
+                "Conversion unexpectedly requested an unresolved input buffer"
+            )
+        return input_buffer
 
     await validate_expression_async(
         key.input_checksum,
@@ -132,7 +164,9 @@ async def evaluate_expression_async(
         path_steps=steps,
         target_celltype=key.celltype,
     )
-    return _evaluate_expression_after_validation(key, input_buffer, steps, cache_key)
+    return _evaluate_expression_after_validation(
+        key, input_buffer, steps, cache_key, get_buffer
+    )
 
 
 async def evaluate_expression_remote(
@@ -177,7 +211,9 @@ async def evaluate_expression_remote(
 
     location = execution
     if location == "auto":
-        location = choose_expression_evaluation_location(key.input_checksum)
+        location = choose_expression_evaluation_location(
+            key.input_checksum, key.path, key.input_celltype, key.celltype
+        )
     if location == "local":
         result = await evaluate_expression_async(
             key.input_checksum,
@@ -322,25 +358,41 @@ def cancel_expression(
 
 def _evaluate_expression_after_validation(
     key: ExpressionKey,
-    input_buffer: Buffer,
+    input_buffer: Buffer | None,
     steps: tuple[tuple[str, Any], ...],
     cache_key: tuple[str, str, str, str],
+    get_buffer: Callable[[], Buffer],
 ) -> Checksum:
-    from .null import is_null, NULL_BUFFER
-    if not steps and (is_null(key.input_checksum) or (key.celltype == "bytes" and input_buffer.content == b"")):
+    from .null import canonicalize_checksum, is_null, NULL_BUFFER
+
+    if not steps and is_null(canonicalize_checksum(key.input_checksum, key.celltype)):
         result_buffer = Buffer(NULL_BUFFER)
         result = result_buffer.get_checksum()
         _expression_cache[cache_key] = result
         _publish_expression_result(result, buffer=result_buffer)
         return result
     if key.path == "" and key.input_celltype == key.celltype:
-        # HashType validation above has already proved the source input_celltype is
-        # structurally compatible. This is the intended skipped source
-        # deserialization path for identity expressions.
+        # Validation rejects known structural incompatibilities without requiring
+        # source content for an identity expression.
         _expression_cache[cache_key] = key.input_checksum
         _publish_expression_result(key.input_checksum, buffer=input_buffer)
         return key.input_checksum
 
+    if not steps:
+        from .convert import convert_checksum
+
+        result_checksum, result_buffer = convert_checksum(
+            key.input_checksum, key.input_celltype, key.celltype, get_buffer
+        )
+        if result_buffer is not None:
+            if result_buffer.get_checksum() != result_checksum:
+                raise ExpressionEvaluationError("Conversion result checksum mismatch")
+            _expression_result_buffers[result_checksum] = result_buffer
+        _expression_cache[cache_key] = result_checksum
+        _publish_expression_result(result_checksum, buffer=result_buffer)
+        return result_checksum
+
+    assert input_buffer is not None
     value = _deserialize_for_expression(input_buffer, key.input_celltype)
     if key.input_celltype == "binary" and steps:
         ndim = getattr(value, "ndim", None)
@@ -427,6 +479,27 @@ def _cache_key(key: ExpressionKey) -> tuple[str, str, str, str]:
         key.input_celltype,
         key.celltype,
     )
+
+
+def _local_buffer_getter(checksum: Checksum) -> Callable[[], Buffer]:
+    """Keep one local buffer lookup lazy and retain its result for evaluation."""
+
+    buffer: Buffer | None = None
+    error: ExpressionEvaluationError | None = None
+
+    def get_buffer() -> Buffer:
+        nonlocal buffer, error
+        if error is not None:
+            raise error
+        if buffer is None:
+            try:
+                buffer = _get_local_buffer(checksum)
+            except ExpressionEvaluationError as exc:
+                error = exc
+                raise
+        return buffer
+
+    return get_buffer
 
 
 def _get_local_buffer(checksum: Checksum) -> Buffer:

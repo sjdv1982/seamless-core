@@ -167,6 +167,13 @@ class Checksum:
         from seamless.diagnostics import record
         record("resolve", self, celltype)
 
+        if celltype is not None:
+            from .checksum.virtual import NOT_VIRTUAL, virtual_value
+
+            value = virtual_value(self, celltype)
+            if value is not NOT_VIRTUAL:
+                return value
+
         from . import Buffer
         from seamless.checksum.calculate_checksum import TRIVIAL_CHECKSUMS
 
@@ -210,7 +217,21 @@ class Checksum:
         from seamless.diagnostics import record
         record("resolution", self, celltype)
 
-        buf = get_buffer_cache().get(self)
+        if celltype is not None:
+            from .checksum.virtual import NOT_VIRTUAL, virtual_value
+
+            value = virtual_value(self, celltype)
+            if value is not NOT_VIRTUAL:
+                return value
+
+        from . import Buffer
+        from seamless.checksum.calculate_checksum import TRIVIAL_CHECKSUMS
+
+        btriv = TRIVIAL_CHECKSUMS.get(self.hex())
+        if btriv is not None:
+            buf = Buffer(btriv)
+        else:
+            buf = get_buffer_cache().get(self)
 
         if buf is None:
             try:

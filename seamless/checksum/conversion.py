@@ -1,71 +1,25 @@
-"""
-Conversions. Note that they operate at a checksum/buffer level, i.e. are "cheap".
-  Conversions imply that that there is neither a access path nor a deep pattern.
-  In contrast, expressions with a path or a deep pattern operate at a value level.
-  VALUE-LEVEL CONVERSION IS NOT DEALT WITH HERE:
-     it is value_conversion and evaluate_expression that do that.
-   (Both source and target object are deserialized, and target_object[path] = source,
-    taking into account deep pattern in case of expressions.)
+"""Checksum-level celltype conversion rules.
 
-Type hierarchy:
+The table below is executed by :mod:`seamless.checksum.convert` for an empty
+Expression path. A rule either retains the checksum, reinterprets the same
+buffer, creates a replacement buffer, or requires an ordinary value
+conversion. Paths and deep hash patterns remain Expression-level work.
 
-(Note: "buffer" means "buffer content" here)
+The relevant storage hierarchy is ``bytes`` / ``mixed`` / ``binary`` and
+``plain``, plus UTF-8 ``text`` (and its code/YAML subtypes). Scalar celltypes
+are interpretations of JSON-compatible buffers. In particular, ``str``
+buffers are not restricted to quoted JSON strings: the reference parser gives
+the scalar interpretation for the requested celltype.
 
-bytes: Buffer and value are the same.
- mixed: combination of plain and binary.
-   binary: value is Numpy array/struct. Buffer is value with np.save.
-      binary-bytes (1D array of dtype S). NOT a subtype of bytes!
-        If you convert them to bytes, do value.tobytes() .
-   plain: Buffer is JSON. Value is what is trivially JSON-serializable.
-     str (with double quotes around *the buffer*), int, float, bool
- text (with no double quotes around *the buffer*).
- Buffer is UTF-8. Value is Python string (read buffer in text mode / buffer.decode())
-   yaml: superset of JSON
-   ipython
-     python
-checksum. Special case: the *value* is a checksum string (checksum.hex())
-  The *checksum* of a checksum cell is therefore the checksum-of a checksum string.
-  Deep cells: when converted to a checksum cell, the checksum of a deep cell remains the same.
-  However, as all deep patterns, this is handled by evaluate_expression and not here.
-  Note that a checksum never holds a reference to the checksum value(s) it contains.
+Subclass-to-superclass conversions are normally trivial; superclass-to-
+subclass conversions are reinterpretations and therefore validate the target
+interpretation. The binary/bytes boundary and text/JSON boundary have the
+explicit reformat rules in ``conversion_reformat``.
 
-In principle, all conversion from a subclass to a superclass is trivial.
-This includes str to plain.
-All conversion from a superclass to a subclass is "reinterpret", including plain to str.
-One exception is between binary/mixed and bytes, since bytes is not a strict superclass.
-This one is "forbidden", as it requires a value.
-Another exception is plain and yaml.
-These conversions are indeed trivial/forbidden for "plain", but not
- for the subclasses of plain (str, bool, int, float), which are forbidden.
-Finally, "mixed" to a subtype of "mixed" requires a value evaluation, hence forbidden.
-
-("bytes", "binary") *normally* doesn't change checksum,
-but it does if it a single Numpy array of dtype "S".
-Hence, the same for ("bytes", "mixed").
-This requires also a value evaluation, hence forbidden.
-
-Text conversion rules:
-- Texts are UTF-8-encoded byte strings. So conversion to bytes is trivial.
-  Conversion from bytes is "reinterpret", dependent on the success of buffer.decode()
-  (UTF-8 is default in Python)
-- Between text and str works as expected.
-  The value remains unchanged, the buffer gets quotes added/removed (json.dumps)
-- Text to plain tries to interpret the text as JSON. Failure gives an exception.
-  (i.e. "reinterpret") .
-  Text to a subclass-of-plain then checks for the data type.
-- Plain to text dumps the cell as JSON text, i.e. "trivial"
-
-Checksum cells: the *value* of the checksum cell:
-- If a checksum string, it can be promoted to any celltype
-- If a dict or list, it can be promoted to plain or to a deep cell (mixed).
-  Mixed cells must have the correct deep pattern.
-  This is not validated!
-  Plain cells will take the value "as-is", i.e. as if the checksums were text.
-  In that case, no checksum references are being maintained!
-All of these promotions are value-based and therefore "forbidden"
-(handled by evaluate_expression)
-
-There is a limit of 1000 chars for buffers of int, float, bool
+``text -> plain`` first tries :mod:`orjson` and otherwise stores the text as a
+plain string. Integer and float parsing has a 1000-byte input limit. Null and
+boolean canonical buffers are checksum-based virtual values, so relevant rules
+can succeed or fail without fetching their buffer.
 """
 
 from .celltypes import celltypes
@@ -99,22 +53,26 @@ conversion_trivial = set(
         ("int", "plain"),
         ("float", "plain"),
         ("bool", "plain"),
+        # Scalar widening / stringification changes interpretation, not bytes.
+        ("int", "float"),
+        ("float", "int"),
+        ("int", "str"),
+        ("float", "str"),
+        ("bool", "str"),
     ]
 )
 
 conversion_reinterpret = set()
 # conversions that do not change checksum, but are not guaranteed to work (raise exception).
 for source, target in conversion_trivial:
-    conversion_reinterpret.add((target, source))
+    reverse = (target, source)
+    if reverse not in conversion_trivial:
+        conversion_reinterpret.add(reverse)
 conversion_reinterpret.difference_update(
     set(
         [
             ("ipython", "python"),
             ("yaml", "plain"),
-            ("plain", "str"),
-            ("plain", "int"),
-            ("plain", "float"),
-            ("plain", "bool"),
         ]
     )
 )
@@ -148,23 +106,12 @@ conversion_reformat = set(
         (
             "text",
             "plain",
-        ),  # if json.loads works, checksum stays the same; else value stays the same (becomes str).
+        ),  # if orjson accepts it, keep; else serialize the text as a plain str.
         #
         ("text", "str"),  # value stays the same
         ("str", "text"),  # value stays the same
         ("yaml", "plain"),  # run YAML parser
         ("ipython", "python"),  # convert to Python code
-        #
-        # simple value conversions:
-        ("int", "str"),
-        ("float", "str"),
-        ("bool", "str"),
-        ("int", "float"),
-        ("bool", "int"),
-        ("float", "int"),
-        ("int", "bool"),
-        ("float", "bool"),
-        ("bool", "float"),
     ]
 )
 
@@ -174,13 +121,6 @@ conversion_possible = set(
         ("binary", "int"),
         ("binary", "float"),
         ("binary", "bool"),
-        ("str", "int"),
-        ("str", "float"),
-        ("str", "bool"),
-        ("plain", "str"),
-        ("plain", "int"),
-        ("plain", "float"),
-        ("plain", "bool"),
         ("mixed", "str"),
         ("mixed", "int"),
         ("mixed", "float"),
@@ -213,7 +153,7 @@ conversion_equivalent = {  # equivalent conversions
     # apply specific converter to generalized outputs
     ("python", "bytes"): ("python", "text"),
     ("ipython", "bytes"): ("ipython", "text"),
-    ("str", "mixed"): ("str", "binary"),
+    ("str", "mixed"): ("str", "plain"),
     ("int", "mixed"): ("int", "plain"),
     ("float", "mixed"): ("float", "plain"),
     ("bool", "mixed"): ("bool", "plain"),
@@ -276,6 +216,11 @@ conversion_values = set(
             "binary",
         ),  # value must be a list; parse with numpy, and dtype must not be "object"
         # or: value must be a scalar
+        # Scalar conversions that must change their serialized value.
+        ("bool", "int"),
+        ("int", "bool"),
+        ("float", "bool"),
+        ("bool", "float"),
         #
         # conversions from/to checksum.
         ("checksum", "bytes"),

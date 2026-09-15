@@ -430,7 +430,7 @@ def _json_string_buffers(numeric: bool) -> dict[Length, bytes]:
         Length.SHORT: b'"42"' if numeric else b'"hello"',
         Length.EQ64: b'"' + fill * 62 + b'"',
         Length.MEDIUM: b'"' + fill * 80 + b'"',
-        Length.LONG: b'"' + fill * 1000 + b'"',
+        Length.LONG: b'"0.' + b"7" * 999 + b'"' if numeric else b'"' + fill * 1000 + b'"',
     }
 
 
@@ -439,7 +439,7 @@ def _json_number_buffers() -> dict[Length, bytes]:
         Length.SHORT: b"42",
         Length.EQ64: b"1" * 64,
         Length.MEDIUM: b"1" * 65,
-        Length.LONG: b"1" * 1001,
+        Length.LONG: b"0." + b"1" * 999,
     }
 
 

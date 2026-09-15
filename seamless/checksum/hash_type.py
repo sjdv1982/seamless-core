@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
+import hashlib
 import io
 import json
-import hashlib
+import math
 from typing import Any
+
+import orjson
 
 from seamless.checksum_class import Checksum
 
@@ -398,8 +401,7 @@ def deserializable_as(
     ti = _coerce(hash_type)
     kind = ti.kind
     checksum_obj = None if checksum is None else Checksum(checksum)
-    from .null import is_null
-    if is_null(checksum_obj):
+    if checksum_obj is not None and checksum_obj in (CHECKSUM_NULL, _CHECKSUM_NULL_NL):
         return True
     if celltype == "bytes":
         return True
@@ -553,8 +555,8 @@ def _mixed_kind(raw: bytes) -> Kind:
 
 def _json_kind_and_flags(text: str) -> tuple[Kind | None, Flag]:
     try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
+        value = orjson.loads(text)
+    except orjson.JSONDecodeError:
         return None, Flag(0)
     if isinstance(value, dict):
         return Kind.JSON_OBJECT, Flag(0)
@@ -562,11 +564,15 @@ def _json_kind_and_flags(text: str) -> tuple[Kind | None, Flag]:
         return Kind.JSON_ARRAY, Flag(0)
     if isinstance(value, str):
         try:
-            float(value)
-        except (TypeError, ValueError):
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
             flags = Flag(0)
         else:
-            flags = Flag.NUMERIC_SCALAR
+            flags = (
+                Flag.NUMERIC_SCALAR
+                if math.isfinite(numeric_value)
+                else Flag(0)
+            )
         return Kind.JSON_STRING, flags
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return Kind.JSON_NUMBER, Flag.NUMERIC_SCALAR
