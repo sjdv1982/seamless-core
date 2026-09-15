@@ -1,5 +1,7 @@
+import gc
+
 import pytest
-from seamless import Buffer, Cell, Checksum, Expression
+from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless.cell_errors import AuthorityError
 from seamless.checksum.null import NULL_CHECKSUM
 from seamless.checksum.celltypes import celltypes
@@ -51,6 +53,20 @@ def test_write_matrix_and_authority(form):
     assert cell.checksum == buffer.get_checksum()
     setter(value)
     assert cell.value == 7
+
+
+@pytest.mark.parametrize('form', ['buffer', 'set_buffer'])
+def test_buffer_writes_deposit_the_buffer(form):
+    # Without a tempref, a dropped buffer that nothing deposited can't be resolved.
+    control = Buffer(f'undeposited standalone {form}', 'text'); checksum = control.get_checksum()
+    del control; gc.collect()
+    with pytest.raises(CacheMissError): checksum.resolve('text')
+    cell = Cell('text')
+    buffer = Buffer(f'deposited standalone {form}', 'text')
+    if form == 'buffer': cell.buffer = buffer
+    else: cell.set_buffer(buffer)
+    del buffer; gc.collect()
+    assert cell.value == f'deposited standalone {form}'
 
 
 @pytest.mark.parametrize('celltype', celltypes + ['deepcell', 'deepfolder', 'folder', 'module'])

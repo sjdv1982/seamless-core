@@ -1,4 +1,6 @@
 """Removed API names cannot silently become paths, including on bound handles."""
+import re
+
 import pytest
 
 from seamless import Cell, Expression
@@ -77,3 +79,36 @@ def test_unwired_cell_has_no_input_type(celltype):
     cell = Cell(celltype)
     assert cell.input_celltype is None
     assert cell.celltype == celltype
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [({}, "mixed"), ({"input_celltype": "str"}, "str"), ({"celltype": "text"}, "text")],
+)
+def test_expression_type_defaults_are_symmetric(kwargs, expected):
+    expression = Expression(None, **kwargs)
+    assert expression.input_celltype == expression.celltype == expected
+
+
+def test_typed_expression_input_supplies_both_types():
+    first = Expression(None, input_celltype="int", celltype="text")
+    second = Expression(first)
+    assert second.input_celltype == second.celltype == "text"
+
+
+@pytest.mark.parametrize("name,replacement", sorted(RETIRED_NAMES.items()))
+@pytest.mark.parametrize(
+    "make", [lambda: Cell("int"), lambda: Cell()["x"]], ids=["cell", "projection"]
+)
+def test_actual_retired_names_are_guarded(make, name, replacement):
+    cell = make()
+    message = re.escape(f"'{name}' has been retired; use {replacement} instead")
+    for operation in (
+        lambda: getattr(cell, name),
+        lambda: setattr(cell, name, 1),
+        lambda: delattr(cell, name),
+    ):
+        with pytest.raises(AttributeError, match=message):
+            operation()
+    with pytest.raises(AttributeError, match=message):
+        getattr(Expression(None), name)
