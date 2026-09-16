@@ -7,6 +7,10 @@ from typing import Callable, List
 class CacheMissError(Exception):
     """Exception for when a checksum cannot be mapped to a buffer"""
 
+    @property
+    def checksum(self):
+        return self.args[0] if self.args else None
+
 
 _IS_WORKER = False
 _closed = False

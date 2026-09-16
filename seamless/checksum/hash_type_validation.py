@@ -52,12 +52,22 @@ def ensure_hash_type(
     *,
     buffer: Buffer | bytes | bytearray | memoryview | None = None,
 ) -> HashType | None:
-    """Return cached HashType, computing it from a local buffer when available."""
+    """Consult memory, then the database outside a running loop, then a buffer."""
 
     checksum = Checksum(checksum)
     hash_type = get_hash_type(checksum)
     if hash_type is not None:
         return hash_type
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        hash_type = asyncio.run(get_hash_type_remote(checksum))
+        if hash_type is not None:
+            return hash_type
+    else:
+        return None
     if buffer is None:
         return None
     return register_hash_type_for_buffer(checksum, buffer)

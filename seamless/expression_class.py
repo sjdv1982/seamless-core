@@ -132,7 +132,7 @@ class Expression:
 
         return self._result_checksum
 
-    def _evaluate_internal(self, *, execution: str = "local") -> Checksum | None:
+    def _evaluate_internal(self, *, execution: str = "auto") -> Checksum | None:
         """Evaluate and publish without expressing user result interest.
 
         Dependency schedulers use this entry point.  Publication is still
@@ -140,7 +140,10 @@ class Expression:
         checksum even when the Expression itself remains neutral.
         """
 
-        from .checksum.expression import evaluate_expression, evaluate_expression_remote
+        from .checksum.expression import (
+            choose_expression_evaluation_location,
+            evaluate_expression,
+        )
 
         input_ref = self._input_ref
         if isinstance(input_ref, Expression):
@@ -152,15 +155,33 @@ class Expression:
             input_checksum = self.input_checksum
         if input_checksum is None:
             raise ValueError("Expression input is not a concrete checksum yet")
-        if execution != "local":
-            # The async remote evaluator is the only non-blocking evaluator.
-            import asyncio
+        import asyncio
 
+        if execution != "local":
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 return asyncio.run(self._evaluate_internal_async(execution=execution))
-            raise RuntimeError(
+        from .checksum.expression import get_expression_cache
+
+        cached = get_expression_cache().get(
+            (input_checksum.hex(), self.path, self.input_celltype, self.celltype)
+        )
+        if (
+            cached is not None
+            and self.validator is None
+            and self.validator_language is None
+        ):
+            return self._publish_result(cached)
+        location = execution
+        if location == "auto":
+            location = choose_expression_evaluation_location(
+                input_checksum, self.path, self.input_celltype, self.celltype
+            )
+        if location != "local":
+            from .error_envelope import RunningLoopRefusal
+
+            raise RunningLoopRefusal(
                 "Cannot block on remote expression evaluation in a running loop"
             )
         result = evaluate_expression(
@@ -174,7 +195,7 @@ class Expression:
         return self._publish_result(result)
 
     async def _evaluate_internal_async(
-        self, *, execution: str = "local"
+        self, *, execution: str = "auto"
     ) -> Checksum | None:
         """Async counterpart of :meth:`_evaluate_internal`."""
 
@@ -354,11 +375,11 @@ class Expression:
             f"input_celltype={self.input_celltype!r}, celltype={self.celltype!r})"
         )
 
-    async def compute_async(self, *, execution: str = "local") -> Checksum | None:
+    async def compute_async(self, *, execution: str = "auto") -> Checksum | None:
         self._enable_result_holding()
         return await self._evaluate_internal_async(execution=execution)
 
-    def compute(self, *, execution: str = "local") -> Checksum | None:
+    def compute(self, *, execution: str = "auto") -> Checksum | None:
         self._enable_result_holding()
         return self._evaluate_internal(execution=execution)
 

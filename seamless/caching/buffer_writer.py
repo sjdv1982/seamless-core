@@ -34,12 +34,14 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class _QueueEntry:
     checksum: "Checksum"
-    buffer: "Buffer"
+    buffer: "Buffer | None"
     future: concurrent.futures.Future
     queued: bool = False
+    hash_type: int | None = None
+    metadata_writer: object = None
 
 
-_entries: Dict["Checksum", _QueueEntry] = {}
+_entries: Dict["Checksum | tuple[Checksum, int]", _QueueEntry] = {}
 _has_checked: Dict[str, set[str]] = {}
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _queue: Optional[asyncio.Queue[_QueueEntry]] = None
@@ -76,6 +78,28 @@ def register(buffer: "Buffer") -> None:
     _enqueue_entry(entry)
 
 
+def register_hash_type(checksum, word):
+    """Queue a metadata write on the buffer writer's existing worker."""
+    ensure_open("HashType writer register")
+    try:
+        from seamless_remote import database_remote
+    except ImportError:
+        return
+    key = (checksum, word)
+    with _lock:
+        if key in _entries:
+            return
+        entry = _QueueEntry(
+            checksum,
+            None,
+            concurrent.futures.Future(),
+            hash_type=word,
+            metadata_writer=database_remote.set_hash_type,
+        )
+        _entries[key] = entry
+    _enqueue_entry(entry)
+
+
 async def await_existing_task(checksum: "Checksum") -> Optional[bool]:
     """Await the shared write task for checksum if it exists."""
     ensure_open("buffer writer await", mark_required=False)
@@ -104,9 +128,10 @@ def purge() -> None:
 
 
 def flush(timeout: Optional[float] = None) -> None:
-    """Synchronously write all queued buffers using direct HTTP calls.
-    This is normally called upon interpreter shutdown.
-    We can't use aiohttp because we can't create new futures at shutdown.
+    """Drain queued HashTypes, then flush buffers using direct HTTP calls.
+
+    Metadata uses the existing worker; buffer writes retain the shutdown-safe
+    HTTP path, which does not create asynchronous futures at interpreter exit.
     """
 
     try:
@@ -114,10 +139,19 @@ def flush(timeout: Optional[float] = None) -> None:
     except ImportError:
         return
 
-    buffers = {checksum: entry.buffer for checksum, entry in _entries.items()}
+    with _lock:
+        metadata = [entry for entry in _entries.values() if entry.hash_type is not None]
+    for entry in metadata:
+        entry.future.result(timeout=timeout)
+
+    buffers = {
+        checksum: entry.buffer
+        for checksum, entry in list(_entries.items())
+        if entry.hash_type is None
+    }
 
     clients = []
-    clients0 = getattr(buffer_remote, "_write_server_clients")
+    clients0 = getattr(buffer_remote, "_write_server_clients", [])
     for c in clients0:
         try:
             init_sync = getattr(c, "ensure_initialized_sync", None)
@@ -309,7 +343,7 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
             break
         if entry.future.cancelled() or entry.future.done():
             continue
-        if buffer_remote is not None:
+        if buffer_remote is not None and entry.hash_type is None:
             try:
                 await buffer_remote.promise(entry.checksum)
             except Exception:
@@ -323,17 +357,18 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
 
 async def _process_entry(entry: _QueueEntry) -> None:
     try:
-        import seamless_remote.buffer_remote as buffer_remote
-    except ImportError:
-        result = False
+        if entry.hash_type is not None:
+            result = await entry.metadata_writer(entry.checksum, entry.hash_type)
+        else:
+            try:
+                import seamless_remote.buffer_remote as buffer_remote
+            except ImportError:
+                result = False
+            else:
+                result = await buffer_remote.write_buffer(entry.checksum, entry.buffer)
         error = None
-    else:
-        try:
-            result = await buffer_remote.write_buffer(entry.checksum, entry.buffer)
-            error = None
-        except Exception as exc:  # pragma: no cover - network errors propagated
-            result = None
-            error = exc
+    except Exception as exc:
+        result, error = None, exc
 
     future = entry.future
     if not future.done():
@@ -343,7 +378,12 @@ async def _process_entry(entry: _QueueEntry) -> None:
             future.set_exception(error)
     if error is None:
         with _lock:
-            _entries.pop(entry.checksum, None)
+            key = (
+                entry.checksum
+                if entry.hash_type is None
+                else (entry.checksum, entry.hash_type)
+            )
+            _entries.pop(key, None)
 
 
 # --- queue submission helpers -------------------------------------------------

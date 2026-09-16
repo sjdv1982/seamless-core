@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import math
+import threading
 from typing import Any
 
 import orjson
@@ -278,7 +279,20 @@ def get_hash_type_cache() -> dict[Checksum, int]:
     return _hash_type_cache
 
 
-def set_hash_type(checksum: Checksum | str | bytes, hash_type: HashType | int) -> None:
+_hash_type_lock = threading.RLock()
+
+
+def set_hash_type(
+    checksum: Checksum | str | bytes, hash_type: HashType | int, *, _upload=True
+) -> None:
+    """Atomically tighten local knowledge and queue changes for upload."""
+    with _hash_type_lock:
+        _set_hash_type(checksum, hash_type, _upload=_upload)
+
+
+def _set_hash_type(
+    checksum: Checksum | str | bytes, hash_type: HashType | int, *, _upload=True
+) -> None:
     """Tighten local knowledge; ignore looser writes and reject contradictions."""
 
     checksum = Checksum(checksum)
@@ -303,6 +317,10 @@ def set_hash_type(checksum: Checksum | str | bytes, hash_type: HashType | int) -
             logging.getLogger(__name__).error(message)
             raise ValueError(message)
     _hash_type_cache[checksum] = word
+    from seamless.caching import buffer_writer
+
+    if _upload:
+        buffer_writer.register_hash_type(checksum, word)
 
 
 def _hash_type_implies(tighter: HashType, looser: HashType) -> bool:
@@ -345,23 +363,17 @@ async def get_hash_type_remote(checksum: Checksum | str | bytes) -> HashType | N
     word = await database_remote.get_hash_type(checksum)
     if word is None:
         return None
-    set_hash_type(checksum, word)
-    return HashType.unpack(word)
+    set_hash_type(checksum, word, _upload=False)
+    return get_hash_type(checksum)
 
 
 async def set_hash_type_remote(
     checksum: Checksum | str | bytes, hash_type: HashType | int
 ) -> bool:
-    """Store HashType locally and in configured remote write databases."""
+    """Tighten local HashType knowledge and queue its database write."""
 
-    checksum = Checksum(checksum)
     set_hash_type(checksum, hash_type)
-    word = get_hash_type(checksum).word
-    try:
-        from seamless_remote import database_remote
-    except ImportError:
-        return False
-    return await database_remote.set_hash_type(checksum, word)
+    return True
 
 
 def register_hash_type_for_buffer(
@@ -402,7 +414,6 @@ async def register_hash_type_for_buffer_async(
         celltype=celltype,
         semantic=semantic,
     )
-    await set_hash_type_remote(checksum, hash_type)
     return hash_type
 
 

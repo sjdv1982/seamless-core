@@ -58,7 +58,10 @@ def choose_expression_evaluation_location(
     input_celltype: str,
     celltype: str,
 ) -> str:
-    """Choose local evaluation when conversion needs no unavailable buffer."""
+    """Choose local when no buffer is needed or it is in process memory.
+
+    Remote means absent from process memory, independently of backend availability.
+    """
 
     from .convert import conversion_needs_buffer
 
@@ -118,6 +121,67 @@ def evaluate_expression(
 
 
 async def evaluate_expression_async(
+    input_checksum,
+    path,
+    input_celltype,
+    celltype,
+    *,
+    validator=None,
+    validator_language=None,
+):
+    """Share one local evaluator task for each complete Expression identity."""
+    key = (
+        "local",
+        Checksum(input_checksum).hex(),
+        path,
+        input_celltype,
+        celltype,
+        str(validator),
+        validator_language,
+    )
+    member = object()
+    with _active_expression_lock:
+        active = _active_expressions.get(key)
+        if active is None or active.result_future.done():
+            active = _ActiveExpression(concurrent.futures.Future(), None, set())
+            _active_expressions[key] = active
+
+            async def execute():
+                try:
+                    result = await _evaluate_expression_async(
+                        input_checksum,
+                        path,
+                        input_celltype,
+                        celltype,
+                        validator=validator,
+                        validator_language=validator_language,
+                    )
+                except BaseException as exc:
+                    if not active.result_future.done():
+                        active.result_future.set_exception(exc)
+                else:
+                    if not active.result_future.done():
+                        active.result_future.set_result(result)
+                finally:
+                    with _active_expression_lock:
+                        if _active_expressions.get(key) is active:
+                            _active_expressions.pop(key, None)
+
+            active.task = asyncio.create_task(execute())
+            active.task.add_done_callback(
+                lambda task: _discard_active_expression(key, active)
+            )
+        active.members.add(member)
+    try:
+        return await asyncio.shield(asyncio.wrap_future(active.result_future))
+    finally:
+        softcancel_expression(key, member)
+
+
+_expression_evaluations = 0
+
+
+async def _evaluate_expression_async(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
@@ -138,14 +202,18 @@ async def evaluate_expression_async(
         _publish_expression_result(cached)
         return cached
 
+    global _expression_evaluations
+    _expression_evaluations += 1
     steps = parse_path(key.path)
     from .convert import conversion_needs_buffer
     from .hash_type_validation import validate_expression_async
     from .null import canonicalize_checksum, is_null
 
     needs_buffer = bool(steps)
-    if not steps and key.input_celltype != key.celltype and not is_null(
-        canonicalize_checksum(key.input_checksum, key.celltype)
+    if (
+        not steps
+        and key.input_celltype != key.celltype
+        and not is_null(canonicalize_checksum(key.input_checksum, key.celltype))
     ):
         needs_buffer = conversion_needs_buffer(
             key.input_checksum, key.input_celltype, key.celltype
@@ -169,6 +237,14 @@ async def evaluate_expression_async(
     return _evaluate_expression_after_validation(
         key, input_buffer, steps, cache_key, get_buffer
     )
+
+
+def _has_daskserver():
+    try:
+        from seamless_remote.daskserver_remote import has_daskserver
+    except ImportError:
+        return False
+    return has_daskserver()
 
 
 async def evaluate_expression_remote(
@@ -216,6 +292,14 @@ async def evaluate_expression_remote(
         location = choose_expression_evaluation_location(
             key.input_checksum, key.path, key.input_celltype, key.celltype
         )
+        if location == "remote":
+            try:
+                from seamless_remote import jobserver_remote
+            except ImportError:
+                location = "local"
+            else:
+                if not jobserver_remote.has_jobserver() and not _has_daskserver():
+                    location = "local"
     if location == "local":
         result = await evaluate_expression_async(
             key.input_checksum,
@@ -270,6 +354,7 @@ async def _run_active_remote_expression(
                 _execute_remote_expression(key, cache_key, active, database_remote)
             )
             _active_expressions[cache_key] = active
+            active.task.add_done_callback(lambda task: _discard_active_expression(cache_key, active))
         active.members.add(member)
     try:
         return await asyncio.shield(asyncio.wrap_future(active.result_future))
@@ -290,7 +375,11 @@ async def _execute_remote_expression(
             raise ExpressionEvaluationError(
                 "Remote expression evaluation requires seamless_remote"
             ) from exc
-        result = await jobserver_remote.run_expression(
+        dispatch = jobserver_remote.run_expression
+        if not jobserver_remote.has_jobserver() and _has_daskserver():
+            from seamless_remote import daskserver_remote
+            dispatch = daskserver_remote.run_expression
+        result = await dispatch(
             key.input_checksum,
             key.path,
             key.input_celltype,
@@ -324,6 +413,14 @@ async def _execute_remote_expression(
                 _active_expressions.pop(cache_key, None)
 
 
+def _discard_active_expression(key, active):
+    with _active_expression_lock:
+        if _active_expressions.get(key) is active:
+            _active_expressions.pop(key, None)
+    if not active.result_future.done():
+        active.result_future.set_exception(asyncio.CancelledError())
+
+
 def softcancel_expression(
     cache_key: tuple[str, str, str, str], member_id: object | None
 ) -> bool:
@@ -340,7 +437,7 @@ def softcancel_expression(
     if not should_cancel:
         return True
     if active.task is not None and not active.task.done():
-        active.task.cancel()
+        active.task.get_loop().call_soon_threadsafe(active.task.cancel)
     if not active.result_future.done():
         active.result_future.set_exception(asyncio.CancelledError())
     return True
@@ -427,6 +524,8 @@ def _publish_expression_result(
     else:
         from seamless.caching.buffer_cache import get_buffer_cache
 
+        from .hash_type import register_hash_type_for_buffer
+        register_hash_type_for_buffer(checksum, buffer)
         get_buffer_cache().tempref(checksum, buffer=buffer)
 
 

@@ -117,10 +117,17 @@ class CellBase:
         if isinstance(self._input_ref, Cell) and self._input_ref.state != "complete":
             self._standalone_exception = None
             return None
+        if self._standalone_exception is not None:
+            return None
+        from .error_envelope import RunningLoopRefusal
         try:
             result = self.compute()
+        except RunningLoopRefusal:
+            self._standalone_exception = None
+            return None
         except Exception as exc:
-            self._standalone_exception = exc
+            from .error_envelope import execution_error
+            self._standalone_exception = execution_error(exc)
             return None
         self._standalone_exception = None
         return result
@@ -167,7 +174,9 @@ class CellBase:
             return "complete"
         if self._standalone_exception is not None:
             return "failed"
-        return "blocked"
+        if isinstance(self._input_ref, Cell) and self._input_ref.state != "complete":
+            return "blocked"
+        return "waiting"
 
     @property
     def exception(self):
@@ -521,9 +530,8 @@ class Cell(CellBase):
 
     def clear_exception(self):
         if self._workflow_backend is None:
-            raise AttributeError(
-                "clear_exception is only available for bound workflow cells"
-            )
+            self._standalone_exception = None
+            return
         return self._workflow_backend.clear_exception()
 
     def _workflow_endpoint(self):
