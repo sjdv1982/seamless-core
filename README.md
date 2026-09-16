@@ -106,6 +106,14 @@ calling a Cell return an immutable Expression. `with_input()` derives a builder
 with a replacement reference. Public `input_ref` and `target_celltype` are retired
 and raise a replacement-directed error; `_input_ref` is a private recipe field.
 
+Standalone reads do not start an upstream Transformation. `.checksum` uses an
+already-produced source result and evaluates the Cell's own projection or
+conversion; `.compute()` is the explicit operation that starts missing upstream
+work. `.buffer` and `.value` resolve the resulting checksum without fingertipping.
+An expression-evaluation failure is retained as `.exception` until
+`clear_exception()`; an unavailable result buffer instead raises `CacheMissError`
+while the Cell remains complete.
+
 At the root, assigning `.value`, `.buffer`, or `.checksum` declares a new input
 and detaches a source. Their ownership-checking counterparts are `.set()`,
 `.set_buffer()`, and `.set_checksum(cs, input_celltype=...)`; these raise

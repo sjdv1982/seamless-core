@@ -132,6 +132,31 @@ class Expression:
 
         return self._result_checksum
 
+    def _available_result(self, *, wait: bool = True) -> Checksum | None:
+        """Return a published result, or join matching expression work only."""
+        result = self._result_checksum_internal()
+        if result is not None or not wait:
+            return result
+        input_ref = self._input_ref
+        while isinstance(input_ref, Expression):
+            input_ref = input_ref._input_ref
+        if (
+            hasattr(input_ref, "_compute_dependency")
+            and input_ref._result_checksum_internal() is None
+        ):
+            return None
+        input_checksum = self.input_checksum
+        if input_checksum is None:
+            return None
+        from .checksum.expression import wait_for_active_expression
+
+        result = wait_for_active_expression(
+            input_checksum, self.path, self.input_celltype, self.celltype,
+            validator=self.validator,
+            validator_language=self.validator_language,
+        )
+        return self._publish_result(result) if result is not None else None
+
     def _evaluate_internal(self, *, execution: str = "auto") -> Checksum | None:
         """Evaluate and publish without expressing user result interest.
 

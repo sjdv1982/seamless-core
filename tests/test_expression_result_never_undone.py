@@ -78,11 +78,6 @@ def test_reevaluation_returns_the_same_valid_checksum(input_celltype, value, pat
         again.run()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="§8.3/§8.4 not implemented: a standalone Cell stays 'complete' with no "
-    "exception, and standalone clear_exception() raises",
-)
 @pytest.mark.parametrize("input_celltype,value,path,celltype,text", CASES)
 def test_standalone_cell_fails_and_clear_exception_reproduces(input_celltype, value, path, celltype, text):
     expression = _expression(input_celltype, value, path, celltype)

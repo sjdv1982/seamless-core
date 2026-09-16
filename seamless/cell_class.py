@@ -24,7 +24,8 @@ class CellBase:
     """
 
     __slots__ = ("_workflow_backend", "_standalone_input_ref", "_input_celltype",
-                 "_celltype", "_standalone_exception", "_refholds_released", "__weakref__")
+                 "_celltype", "_standalone_exception", "_standalone_result_checksum",
+                 "_refholds_released", "__weakref__")
 
     def build(self):
         return self._workflow_backend.build(_UNSET)
@@ -74,6 +75,7 @@ class CellBase:
         self._input_ref = input_ref
         self._input_celltype = None if input_ref is None else typed or input_celltype or self.celltype
         self._standalone_exception = None
+        self._standalone_result_checksum = None
         if isinstance(old, Checksum):
             old.decref_refholder()
 
@@ -100,12 +102,17 @@ class CellBase:
         Buffer._map_celltype(celltype)
         self._celltype = celltype
         self._standalone_exception = None
+        self._standalone_result_checksum = None
 
     @property
     def checksum(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.checksum
         if self._input_ref is None:
+            return None
+        if self._standalone_result_checksum is not None:
+            return self._standalone_result_checksum
+        if self._standalone_exception is not None:
             return None
         from .checksum_class import Checksum
         if (isinstance(self._input_ref, Checksum) and not self._path
@@ -114,14 +121,19 @@ class CellBase:
             if self.celltype == "bytes" and self._input_ref.hex() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855":
                 return Checksum(NULL_CHECKSUM)
             return self._input_ref
-        if isinstance(self._input_ref, Cell) and self._input_ref.state != "complete":
-            self._standalone_exception = None
-            return None
-        if self._standalone_exception is not None:
+        input_checksum = _available_input_checksum(self._input_ref)
+        if input_checksum is None:
             return None
         from .error_envelope import RunningLoopRefusal
         try:
-            result = self.compute()
+            result = Expression(
+                input_checksum,
+                path=self._path,
+                input_celltype=self.input_celltype,
+                celltype=self._celltype,
+                validator=self._validator,
+                validator_language=self._validator_language,
+            ).compute()
         except RunningLoopRefusal:
             self._standalone_exception = None
             return None
@@ -130,6 +142,7 @@ class CellBase:
             self._standalone_exception = execution_error(exc)
             return None
         self._standalone_exception = None
+        self._standalone_result_checksum = result
         return result
 
     @checksum.setter
@@ -141,7 +154,16 @@ class CellBase:
         if self._workflow_backend is not None:
             return self._workflow_backend.buffer
         checksum = self.checksum
-        return None if checksum is None else checksum.resolve()
+        if checksum is None:
+            return None
+        try:
+            from .checksum.hash_type_validation import validate_deserializable_as
+            validate_deserializable_as(checksum, self.celltype)
+            buffer = checksum.resolve()
+            validate_deserializable_as(checksum, self.celltype, buffer=buffer)
+            return buffer
+        except Exception as exc:
+            return self._handle_materialization_error(exc)
 
     @buffer.setter
     def buffer(self, value):
@@ -156,7 +178,10 @@ class CellBase:
             if self._standalone_exception is not None:
                 raise self._standalone_exception
             return None
-        value = checksum.resolve(self.celltype)
+        try:
+            value = checksum.resolve(self.celltype)
+        except Exception as exc:
+            return self._handle_materialization_error(exc)
         return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     @value.setter
@@ -169,13 +194,13 @@ class CellBase:
             return self._workflow_backend.state
         if self._input_ref is None:
             return "unwired"
+        if self._standalone_exception is not None:
+            return "failed"
         checksum = self.checksum
         if checksum is not None:
             return "complete"
         if self._standalone_exception is not None:
             return "failed"
-        if isinstance(self._input_ref, Cell) and self._input_ref.state != "complete":
-            return "blocked"
         return "waiting"
 
     @property
@@ -184,6 +209,20 @@ class CellBase:
             return self._workflow_backend.exception
         self.checksum
         return self._standalone_exception
+
+    def clear_exception(self):
+        if self._workflow_backend is None:
+            self._standalone_exception = None
+            return
+        return self._workflow_backend.clear_exception()
+
+    def _handle_materialization_error(self, exc):
+        from . import CacheMissError
+        if isinstance(exc, CacheMissError):
+            raise exc
+        from .error_envelope import execution_error
+        self._standalone_exception = execution_error(exc)
+        raise self._standalone_exception
 
     def _check_write_authority(self, detach):
         if not detach and self.source is not None:
@@ -264,19 +303,42 @@ class CellBase:
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.compute(input_ref, timeout=timeout)
-        return self.build(input_ref).compute()
+        try:
+            result = self.build(input_ref).compute()
+        except Exception as exc:
+            from .error_envelope import execution_error
+            self._standalone_exception = execution_error(exc)
+            self._standalone_result_checksum = None
+            return None
+        self._standalone_exception = None
+        self._standalone_result_checksum = result
+        return result
 
     def run(self, input_ref: Any = _UNSET):
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.run(input_ref)
-        return self.build(input_ref).run()
+        result = self.compute(input_ref)
+        if result is None:
+            if self._standalone_exception is not None:
+                raise self._standalone_exception
+            return None
+        return self.value
 
     async def compute_async(self, input_ref: Any = _UNSET, *, timeout=None):
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return await self._workflow_backend.compute_async(input_ref, timeout=timeout)
-        return await self.build(input_ref).compute_async()
+        try:
+            result = await self.build(input_ref).compute_async()
+        except Exception as exc:
+            from .error_envelope import execution_error
+            self._standalone_exception = execution_error(exc)
+            self._standalone_result_checksum = None
+            return None
+        self._standalone_exception = None
+        self._standalone_result_checksum = result
+        return result
 
     async def computation(self, timeout=None):
         return await self.compute_async(timeout=timeout)
@@ -343,6 +405,7 @@ class Cell(CellBase):
         self._validator = validator
         self._validator_language = validator_language
         self._standalone_exception = None
+        self._standalone_result_checksum = None
         self._refholds_released = False
         register_refholder(self)
         if isinstance(ref, Checksum):
@@ -361,6 +424,7 @@ class Cell(CellBase):
         object.__setattr__(self, "_validator", None)
         object.__setattr__(self, "_validator_language", None)
         object.__setattr__(self, "_standalone_exception", None)
+        object.__setattr__(self, "_standalone_result_checksum", None)
         object.__setattr__(self, "_refholds_released", True)
         return self
 
@@ -379,6 +443,8 @@ class Cell(CellBase):
         if self._workflow_backend is not None:
             raise _bound_state_error("path")
         self._path = normalize_path(path)
+        self._standalone_exception = None
+        self._standalone_result_checksum = None
 
     @property
     def path_python(self) -> str:
@@ -401,6 +467,8 @@ class Cell(CellBase):
             self._workflow_backend.validator = validator
             return
         self._validator = validator
+        self._standalone_exception = None
+        self._standalone_result_checksum = None
 
     @property
     def validator_language(self) -> str | None:
@@ -414,6 +482,8 @@ class Cell(CellBase):
             self._workflow_backend.validator_language = validator_language
             return
         self._validator_language = validator_language
+        self._standalone_exception = None
+        self._standalone_result_checksum = None
 
 
 
@@ -754,6 +824,22 @@ def _capture_workflow_source(value: Any) -> Any:
 
 
 __all__ = ["Cell", "CellBase"]
+
+
+def _available_input_checksum(value):
+    """Read an input result without starting transformation work."""
+    from .checksum_class import Checksum
+
+    if isinstance(value, Checksum):
+        return value
+    if isinstance(value, Expression):
+        return value._available_result()
+    if isinstance(value, Cell):
+        return value.checksum
+    result_getter = getattr(value, "_result_checksum_internal", None)
+    if callable(result_getter):
+        return result_getter()
+    return None
 
 
 def _typed_input_celltype(value):

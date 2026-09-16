@@ -52,6 +52,27 @@ def get_expression_cache() -> dict[tuple[str, str, str, str], Checksum]:
     return _expression_cache
 
 
+def wait_for_active_expression(
+    input_checksum, path, input_celltype, celltype, *, validator=None,
+    validator_language=None,
+):
+    """Return an already-running expression's result, without starting one."""
+    cache_key = (Checksum(input_checksum).hex(), path, input_celltype, celltype)
+    local_key = ("local", *cache_key, str(validator), validator_language)
+    with _active_expression_lock:
+        active = _active_expressions.get(cache_key)
+        if active is None:
+            active = _active_expressions.get(local_key)
+        future = None if active is None else active.result_future
+    if future is None:
+        return None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return Checksum(future.result())
+    return None
+
+
 def choose_expression_evaluation_location(
     input_checksum: Checksum | str | bytes,
     path: str,
