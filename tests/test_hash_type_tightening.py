@@ -25,6 +25,22 @@ CHECKSUM = Checksum("a" * 64)
 UNTESTED = (Kind.UNTESTED, Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED)
 
 
+def test_checksum_is_required_for_hash_type_queries():
+    value = HashType(Kind.JSON_STRING, Length.SHORT)
+    with pytest.raises(TypeError, match="checksum"):
+        value.deserializable_as("bool")
+    with pytest.raises(TypeError, match="checksum"):
+        ht.deserializable_as(value, "bool")
+    with pytest.raises(TypeError, match="checksum"):
+        conversion_feasible(value, "plain", "bool")
+
+
+@pytest.mark.parametrize("celltype", ("int", "float", "binary", "checksum", "bool"))
+def test_null_checksum_is_deserializable_as_previously_rejected_types(celltype):
+    value = HashType(Kind.JSON_STRING, Length.SHORT)
+    assert value.deserializable_as(celltype, checksum=ht.CHECKSUM_NULL) is True
+
+
 @pytest.mark.parametrize("kind,number,utf8,json,mic", [
     (Kind.UNTESTED, 9, False, False, "bytes"),
     (Kind.UTF8_UNTESTED, 10, True, False, "text"),
@@ -44,6 +60,14 @@ def test_untested_encoding_and_membership(kind, number, utf8, json, mic):
             assert not ht.is_valid_word(HashType(kind, length, flags=flag).word)
         assert not ht.is_valid_word(HashType(kind, length, dtype=DType.NUMERIC).word)
         assert not ht.is_valid_word(HashType(kind, length, rank=Rank.D1).word)
+
+
+def test_semantic_flag_is_reserved():
+    value = HashType(Kind.RAW_TEXT, Length.SHORT, flags=Flag.SEMANTIC)
+
+    assert not ht.is_valid_word(value.word)
+    with pytest.raises(ValueError, match="Invalid HashType word"):
+        ht.set_hash_type(CHECKSUM, value)
 
 
 @pytest.mark.parametrize("kind", UNTESTED)
@@ -100,7 +124,6 @@ def test_all_kind_branches_tighten_from_their_ancestors(kind):
     (HashType(Kind.UTF8_UNTESTED, Length.SHORT), HashType(Kind.RAW_BYTES, Length.SHORT)),
     (HashType(Kind.JSON_OBJECT, Length.SHORT), HashType(Kind.JSON_ARRAY, Length.SHORT)),
     (HashType(Kind.JSON_STRING, Length.SHORT), HashType(Kind.JSON_STRING, Length.SHORT, flags=Flag.NUMERIC_SCALAR)),
-    (HashType(Kind.RAW_TEXT, Length.SHORT), HashType(Kind.RAW_TEXT, Length.SHORT, flags=Flag.SEMANTIC)),
     (HashType(Kind.NUMPY, Length.LONG, DType.NUMERIC), HashType(Kind.NUMPY, Length.LONG, DType.NONNUMERIC)),
     (HashType(Kind.NUMPY, Length.LONG, DType.NUMERIC), HashType(Kind.NUMPY, Length.LONG, DType.NUMERIC, Rank.D1)),
 ])
@@ -137,6 +160,14 @@ def test_local_validation_accepts_unknown_and_checks_proven_negatives(kind):
     if kind != Kind.UNTESTED:
         with pytest.raises(HashTypeValidationError):
             validate_deserializable_as(CHECKSUM, "binary")
+
+
+def test_checksum_target_is_feasible_after_source_deserializability_check():
+    unknown = HashType(Kind.UNTESTED, Length.SHORT)
+    invalid_plain = HashType(Kind.RAW_BYTES, Length.SHORT)
+
+    assert conversion_feasible(unknown, "plain", "checksum", checksum=CHECKSUM) is True
+    assert conversion_feasible(invalid_plain, "plain", "checksum", checksum=CHECKSUM) is False
 
 
 @pytest.mark.parametrize("kind", UNTESTED)

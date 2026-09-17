@@ -82,7 +82,7 @@ def test_parse_buffer_scalars(raw, celltype, expected):
 @pytest.mark.parametrize("celltype", ["int", "float"])
 def test_nonfinite_numeric_strings_are_rejected_by_hashtype_and_parser(raw, celltype):
     buffer, checksum = _serialized(raw)
-    hash_type = HashType.from_buffer(buffer, checksum=checksum)
+    hash_type = HashType.from_buffer(buffer)
     assert not hash_type.deserializable_as(celltype, checksum=checksum)
     with pytest.raises(HashTypeValidationError):
         validate_deserializable_as(checksum, celltype, buffer=buffer)

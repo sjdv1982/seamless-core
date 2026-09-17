@@ -87,22 +87,18 @@ def expression_case_id(witness: HashTypeWitness, case: ExpressionCase) -> str:
 
 def _build_witnesses() -> list[HashTypeWitness]:
     witnesses: list[HashTypeWitness] = []
-    for semantic in (False, True):
-        flags = Flag.SEMANTIC if semantic else Flag(0)
-        prefix = "raw_text_semantic" if semantic else "raw_text"
-        for length, raw in _raw_text_buffers().items():
-            witnesses.append(
-                _witness(
-                    f"{prefix}_{length.name.lower()}",
-                    raw,
-                    Kind.RAW_TEXT,
-                    length,
-                    flags=flags,
-                    value=raw.decode(),
-                    mic="text",
-                    expressions=_flat_text_expressions(),
-                )
+    for length, raw in _raw_text_buffers().items():
+        witnesses.append(
+            _witness(
+                f"raw_text_{length.name.lower()}",
+                raw,
+                Kind.RAW_TEXT,
+                length,
+                value=raw.decode(),
+                mic="text",
+                expressions=_flat_text_expressions(),
             )
+        )
 
     for length, raw in _raw_bytes_buffers().items():
         witnesses.append(
