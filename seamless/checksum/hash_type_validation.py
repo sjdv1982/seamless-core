@@ -52,12 +52,17 @@ def ensure_hash_type(
     *,
     buffer: Buffer | bytes | bytearray | memoryview | None = None,
 ) -> HashType | None:
-    """Consult memory, then the database outside a running loop, then a buffer."""
+    """Use local knowledge, then classify a supplied buffer before DB lookup."""
 
     checksum = Checksum(checksum)
     hash_type = get_hash_type(checksum)
     if hash_type is not None:
         return hash_type
+
+    if buffer is not None:
+        # Classification is local CPU work; the upload is only enqueued.
+        return register_hash_type_for_buffer(checksum, buffer)
+
     import asyncio
 
     try:
@@ -66,11 +71,8 @@ def ensure_hash_type(
         hash_type = asyncio.run(get_hash_type_remote(checksum))
         if hash_type is not None:
             return hash_type
-    else:
-        return None
-    if buffer is None:
-        return None
-    return register_hash_type_for_buffer(checksum, buffer)
+
+    return None
 
 
 async def ensure_hash_type_async(
@@ -211,7 +213,7 @@ def conversion_feasible(
     source_celltype: str,
     target_celltype: str,
     *,
-    checksum: Checksum | str | bytes | None = None,
+    checksum: Checksum | str | bytes,
 ) -> bool | None:
     """Return False only when HashType proves conversion impossible."""
 
@@ -223,10 +225,14 @@ def conversion_feasible(
         return True
     if hash_type.deserializable_as(source_celltype, checksum=checksum) is False:
         return False
+    if target_celltype == "checksum":
+        return True
     conv = (source_celltype, target_celltype)
     conv = conversion_equivalent.get(conv, conv)
     if conv in conversion_chain:
-        return None
+        return _chain_conversion_feasible(
+            hash_type, source_celltype, target_celltype, checksum=checksum
+        )
     if conv in conversion_forbidden:
         return False
     if conv in conversion_trivial or conv in conversion_reformat:
@@ -235,14 +241,54 @@ def conversion_feasible(
         return hash_type.deserializable_as(target_celltype, checksum=checksum)
     if conv in conversion_possible:
         if hash_type.is_untested:
-            if target_celltype in ("int", "float") and hash_type.length.name == "LONG":
-                return False
             return None
         return _possible_conversion_feasible(hash_type, source_celltype, target_celltype)
     if conv in conversion_values:
         if hash_type.is_untested:
             return None
         return _value_conversion_feasible(hash_type, source_celltype, target_celltype)
+    return None
+
+
+def _chain_conversion_feasible(
+    hash_type: HashType,
+    source_celltype: str,
+    target_celltype: str,
+    *,
+    checksum: Checksum | str | bytes,
+) -> bool | None:
+    conversion = (source_celltype, target_celltype)
+    conversion = conversion_equivalent.get(conversion, conversion)
+    intermediate = conversion_chain[conversion]
+    first = conversion_feasible(
+        hash_type, source_celltype, intermediate, checksum=checksum
+    )
+    if first is False:
+        return False
+
+    first_conversion = conversion_equivalent.get(
+        (source_celltype, intermediate), (source_celltype, intermediate)
+    )
+    if (
+        first_conversion not in conversion_trivial
+        and first_conversion not in conversion_reinterpret
+    ):
+        return None
+
+    second = conversion_feasible(
+        hash_type, intermediate, target_celltype, checksum=checksum
+    )
+    if second is False:
+        return False
+
+    second_conversion = conversion_equivalent.get(
+        (intermediate, target_celltype), (intermediate, target_celltype)
+    )
+    if (
+        second_conversion in conversion_trivial
+        or second_conversion in conversion_reformat
+    ):
+        return first
     return None
 
 
@@ -301,11 +347,19 @@ def _possible_conversion_feasible(
     target_celltype: str,
 ) -> bool | None:
     if target_celltype in ("int", "float"):
-        if hash_type.length.name == "LONG":
+        kind = hash_type.kind.name
+        if kind == "NUMPY":
+            if hash_type.rank.name != "SCALAR":
+                return False
+            if hash_type.dtype.name == "NUMERIC":
+                return True
+            return None
+        if kind in ("JSON_OBJECT", "JSON_ARRAY", "MIXED_OBJECT", "MIXED_ARRAY"):
             return False
-        if source_celltype == "binary":
-            return hash_type.dtype.name == "NUMERIC" and hash_type.rank.name == "SCALAR"
-        return True if hash_type.is_json_numeric_scalar else False
+        if kind == "JSON_NUMBER" or hash_type.is_json_numeric_scalar:
+            return True
+        if kind == "JSON_STRING":
+            return None
     if target_celltype == "str" and source_celltype == "mixed":
         if hash_type.kind.name in ("JSON_OBJECT", "JSON_ARRAY"):
             return False
@@ -318,8 +372,6 @@ def _value_conversion_feasible(
     source_celltype: str,
     target_celltype: str,
 ) -> bool | None:
-    if target_celltype == "checksum":
-        return hash_type.kind.name == "RAW_TEXT" and hash_type.length.name == "EQ64"
     if source_celltype == "checksum":
         return None
     if source_celltype == "plain" and target_celltype == "binary":

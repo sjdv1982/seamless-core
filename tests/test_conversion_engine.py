@@ -212,6 +212,15 @@ def test_failed_conversion_rules_raise(source, target, buffer):
         convert_checksum(checksum, source, target, lambda: input_buffer)
 
 
+@pytest.mark.parametrize("value", ("inf", "-inf", "nan"))
+def test_conversion_possible_rejects_nonfinite_float_results(value):
+    input_buffer = Buffer(value, "mixed")
+    checksum = input_buffer.get_checksum()
+
+    with pytest.raises(SeamlessConversionError, match="non-finite float result"):
+        convert_checksum(checksum, "mixed", "float", lambda: input_buffer)
+
+
 @pytest.mark.parametrize("source,target", sorted(conversion_trivial))
 def test_every_trivial_conversion_needs_no_buffer(source, target, monkeypatch):
     input_buffer = _source_buffer(source)

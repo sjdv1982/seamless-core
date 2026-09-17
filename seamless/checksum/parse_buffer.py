@@ -142,7 +142,11 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
         "DESERIALIZE: buffer of length {}, checksum {}".format(len(buffer), checksum)
     )
     hash_type = validate_deserializable_as(checksum, celltype, buffer=buffer)
-    assert hash_type is not None
+    if hash_type is None:
+        raise RuntimeError(
+            "HashType validation did not classify the buffer "
+            f"for checksum {checksum.hex()}"
+        )
     if celltype in text_types2:
         s = buffer.decode()
         value = s.rstrip("\n")

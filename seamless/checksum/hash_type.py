@@ -116,7 +116,7 @@ class HashType:
         return bool(self.flags & Flag.NUMERIC_SCALAR)
 
     def deserializable_as(
-        self, celltype: str, *, checksum: Checksum | str | bytes | None = None
+        self, celltype: str, *, checksum: Checksum | str | bytes
     ) -> bool | None:
         return deserializable_as(self, celltype, checksum=checksum)
 
@@ -134,21 +134,9 @@ class HashType:
 
     @classmethod
     def from_buffer(
-        cls,
-        buffer: bytes | bytearray | memoryview | Any,
-        *,
-        checksum: Checksum | str | bytes | None = None,
-        value: Any = None,
-        celltype: str | None = None,
-        semantic: bool = False,
+        cls, buffer: bytes | bytearray | memoryview | Any
     ) -> "HashType":
-        return from_buffer(
-            buffer,
-            checksum=checksum,
-            value=value,
-            celltype=celltype,
-            semantic=semantic,
-        )
+        return from_buffer(buffer)
 
     @classmethod
     def unpack(cls, word: int) -> "HashType":
@@ -268,8 +256,7 @@ def is_valid_word(word: int) -> bool:
         if kind not in (Kind.JSON_NUMBER, Kind.JSON_STRING):
             return False
     if flags & Flag.SEMANTIC:
-        if kind != Kind.RAW_TEXT:
-            return False
+        return False
     return True
 
 
@@ -379,20 +366,10 @@ async def set_hash_type_remote(
 def register_hash_type_for_buffer(
     checksum: Checksum | str | bytes,
     buffer: bytes | bytearray | memoryview | Any,
-    *,
-    value: Any = None,
-    celltype: str | None = None,
-    semantic: bool = False,
 ) -> HashType:
     """Compute and cache HashType for a known checksum and buffer."""
 
-    hash_type = from_buffer(
-        buffer,
-        checksum=checksum,
-        value=value,
-        celltype=celltype,
-        semantic=semantic,
-    )
+    hash_type = from_buffer(buffer)
     set_hash_type(checksum, hash_type)
     return hash_type
 
@@ -400,38 +377,20 @@ def register_hash_type_for_buffer(
 async def register_hash_type_for_buffer_async(
     checksum: Checksum | str | bytes,
     buffer: bytes | bytearray | memoryview | Any,
-    *,
-    value: Any = None,
-    celltype: str | None = None,
-    semantic: bool = False,
 ) -> HashType:
     """Compute and cache HashType locally and remotely for a known buffer."""
 
-    hash_type = register_hash_type_for_buffer(
-        checksum,
-        buffer,
-        value=value,
-        celltype=celltype,
-        semantic=semantic,
-    )
-    return hash_type
+    return register_hash_type_for_buffer(checksum, buffer)
 
 
 def from_buffer(
     buffer: bytes | bytearray | memoryview | Any,
-    *,
-    checksum: Checksum | str | bytes | None = None,
-    value: Any = None,
-    celltype: str | None = None,
-    semantic: bool = False,
 ) -> HashType:
     """Compute a HashType from buffer bytes.
 
     `mixed` is only emitted for Seamless mixed-format buffers. Pure JSON or raw
     binary buffers are classified by their actual storage format.
     """
-
-    del checksum, value, celltype  # Phase 5 producer is byte-authoritative.
     raw = _as_bytes(buffer)
     length = _length_bucket(len(raw))
     if raw.startswith(_magic_numpy()):
@@ -447,8 +406,7 @@ def from_buffer(
 
     kind, flags = _json_kind_and_flags(text)
     if kind is None:
-        flags = Flag.SEMANTIC if semantic else Flag(0)
-        return HashType(Kind.RAW_TEXT, length, flags=flags)
+        return HashType(Kind.RAW_TEXT, length)
     return HashType(kind, length, flags=flags)
 
 
@@ -456,14 +414,14 @@ def deserializable_as(
     hash_type: HashType | int,
     celltype: str,
     *,
-    checksum: Checksum | str | bytes | None = None,
+    checksum: Checksum | str | bytes,
 ) -> bool | None:
     """Return True (known), False (disproved), or None (requires parsing)."""
 
     ti = _coerce(hash_type)
     kind = ti.kind
-    checksum_obj = None if checksum is None else Checksum(checksum)
-    if checksum_obj is not None and checksum_obj in (CHECKSUM_NULL, _CHECKSUM_NULL_NL):
+    checksum_obj = Checksum(checksum)
+    if checksum_obj in (CHECKSUM_NULL, _CHECKSUM_NULL_NL):
         return True
     if celltype == "bytes":
         return True

@@ -10,6 +10,7 @@ choosing where an expression should run.
 from __future__ import annotations
 
 import builtins
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -169,9 +170,9 @@ def _value_of(
     if value is not NOT_VIRTUAL:
         return value
 
-    # If cached HashType already disproves the interpretation, fail before a
-    # local or remote getter is touched.  With no cached type this is a no-op;
-    # _parse_buffer registers and validates after obtaining the buffer.
+    # Reject known incompatibilities before fetching. Without a cached type,
+    # this can query the database outside a running loop; inside a loop it
+    # defers classification until _parse_buffer has the buffer.
     validate_deserializable_as(checksum, celltype)
     return _parse_buffer(get_buffer(), checksum, celltype)
 
@@ -247,7 +248,7 @@ def _bytes_to_mixed(
     buffer = get_buffer()
     from .hash_type import HashType
 
-    inspected_type = HashType.from_buffer(buffer, checksum=checksum)
+    inspected_type = HashType.from_buffer(buffer)
     if inspected_type.deserializable_as("mixed", checksum=checksum):
         # Ensure a malformed mixed/NPY payload cannot be retained merely from
         # its prefix or JSON classification.
@@ -326,6 +327,8 @@ def _convert_possible(
     except ImportError:  # pragma: no cover - numpy is a core dependency
         pass
     target_value = getattr(builtins, target)(value)
+    if target == "float" and not math.isfinite(target_value):
+        raise ValueError("non-finite float result")
     return _buffer_result(Buffer(target_value, target))
 
 
@@ -346,6 +349,18 @@ def _convert_values(
     value = _value_of(checksum, source, get_buffer)
     conv = (source, target)
     if conv == ("binary", "plain"):
+        import numpy as np
+
+        # orjson silently serializes NaN/Infinity as JSON null, which would
+        # otherwise turn non-finite floats into None without ever raising.
+        if isinstance(value, np.ndarray):
+            if value.dtype.kind in "fc" and not np.isfinite(value).all():
+                raise ValueError("cannot convert non-finite float to plain")
+        elif isinstance(value, (float, complex)) and not math.isfinite(
+            value.real if isinstance(value, complex) else value
+        ):
+            raise ValueError("cannot convert non-finite float to plain")
+
         # Convert numpy objects to ordinary JSON values, then use the normal
         # canonical plain serializer rather than retaining compact JSON bytes.
         encoded = orjson.dumps(value, option=orjson.OPT_SERIALIZE_NUMPY)
