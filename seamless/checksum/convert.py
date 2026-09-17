@@ -349,6 +349,18 @@ def _convert_values(
     value = _value_of(checksum, source, get_buffer)
     conv = (source, target)
     if conv == ("binary", "plain"):
+        import numpy as np
+
+        # orjson silently serializes NaN/Infinity as JSON null, which would
+        # otherwise turn non-finite floats into None without ever raising.
+        if isinstance(value, np.ndarray):
+            if value.dtype.kind in "fc" and not np.isfinite(value).all():
+                raise ValueError("cannot convert non-finite float to plain")
+        elif isinstance(value, (float, complex)) and not math.isfinite(
+            value.real if isinstance(value, complex) else value
+        ):
+            raise ValueError("cannot convert non-finite float to plain")
+
         # Convert numpy objects to ordinary JSON values, then use the normal
         # canonical plain serializer rather than retaining compact JSON bytes.
         encoded = orjson.dumps(value, option=orjson.OPT_SERIALIZE_NUMPY)
