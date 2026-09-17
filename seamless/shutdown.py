@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import gc
 import logging
 import os
 import signal
@@ -249,6 +250,8 @@ def close(*, from_atexit: bool = False) -> None:
     _run_close_hooks()
     failures: List[str] = []
     pending_buffers: List[str] = []
+    refholders: List[Any] = []
+    warned_manual: set[Any] = set()
     worker_shutdown = False
     try:
         for logger_name in (
@@ -319,9 +322,51 @@ def close(*, from_atexit: bool = False) -> None:
                 else:
                     failures.append(f"shutdown_workers raised: {exc}")
 
+        # Lifecycle audit is deliberately after activity has settled and before
+        # buffer flushing and holder cleanup, so it sees the final semantic state.
+        try:
+            from .reference_lifecycle import audit_reference_accounting, registered_refholders
+
+            refholders = registered_refholders()
+            audit_reference_accounting(holders=refholders, warned_manual=warned_manual)
+        except Exception as exc:
+            logging.getLogger("seamless.references").warning(
+                "Reference lifecycle audit raised: %s", exc
+            )
+
         # Phase 2: buffer flush attempts
         _debug("flushing pending buffers (short/long)")
         pending_buffers = _flush_buffers_short_then_long(failures)
+
+        # Release explicit lifecycle ownership while buffers are still available
+        # to the existing writer flush, then allow finalizers to settle.
+        for holder in refholders:
+            try:
+                holder._release_refholds()
+            except Exception as exc:
+                logging.getLogger("seamless.references").warning(
+                    "Refholder %s 0x%x cleanup raised: %s",
+                    type(holder).__name__,
+                    id(holder),
+                    exc,
+                )
+        refholders = []
+        gc.collect()
+        gc.collect()
+        try:
+            from .reference_lifecycle import audit_reference_accounting
+            from .caching.buffer_cache import get_buffer_cache
+
+            audit_reference_accounting(
+                cache=get_buffer_cache(),
+                holders=[],
+                warned_manual=warned_manual,
+            )
+            get_buffer_cache().force_clear_reference_accounting()
+        except Exception as exc:
+            logging.getLogger("seamless.references").warning(
+                "Reference lifecycle post-cleanup raised: %s", exc
+            )
 
         # Close remote client sessions/keepalive
         _debug("closing remote clients")

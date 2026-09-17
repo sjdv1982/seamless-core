@@ -6,6 +6,7 @@ from .calculate_checksum import (
 )
 
 from ..util import lrucache2
+from .hash_type import register_hash_type_for_buffer
 
 # calculate_checksum_cache: maps id(buffer) to (checksum, buffer).
 # Need to store (a ref to) buffer,
@@ -26,10 +27,12 @@ async def cached_calculate_checksum(buffer: Buffer) -> Checksum:
     if cached_checksum is not None:
         cached_checksum = Checksum(cached_checksum)
         checksum_cache[cached_checksum] = buffer2
+        register_hash_type_for_buffer(cached_checksum, buffer2)
         return cached_checksum
     checksum = Checksum(calculate_checksum_func(buffer2))
     calculate_checksum_cache[buf_id] = checksum, buffer2
     checksum_cache[checksum] = buffer2
+    register_hash_type_for_buffer(checksum, buffer2)
     return checksum
 
 
@@ -43,8 +46,10 @@ def cached_calculate_checksum_sync(buffer: Buffer) -> Checksum:
     if cached_checksum is not None:
         cached_checksum = Checksum(cached_checksum)
         checksum_cache[cached_checksum] = buffer2
+        register_hash_type_for_buffer(cached_checksum, buffer2)
         return cached_checksum
     checksum = Checksum(calculate_checksum_func(buffer2))
     calculate_checksum_cache[buf_id] = checksum, buffer2
     checksum_cache[checksum] = buffer2
+    register_hash_type_for_buffer(checksum, buffer2)
     return checksum

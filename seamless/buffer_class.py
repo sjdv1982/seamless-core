@@ -25,8 +25,8 @@ class Buffer:
 
         if isinstance(value_or_buffer, Buffer):
             value_or_buffer = value_or_buffer.content
-        elif isinstance(value_or_buffer, Checksum):
-            raise TypeError
+        elif isinstance(value_or_buffer, Checksum) and celltype != "checksum":
+            raise TypeError("A Checksum is a value only for celltype 'checksum'")
 
         if celltype is None:
             if isinstance(value_or_buffer, Buffer):
@@ -49,6 +49,9 @@ class Buffer:
         if checksum:
             self._checksum = Checksum(checksum)
             get_buffer_cache().register(self._checksum, self, size=len(self.content))
+            from .checksum.hash_type import register_hash_type_for_buffer
+
+            register_hash_type_for_buffer(self._checksum, self)
 
     @staticmethod
     def _map_celltype(celltype: str) -> str:
@@ -100,6 +103,8 @@ class Buffer:
 
     def get_checksum(self) -> Checksum:
         """Returns the buffer's Checksum object, calculating it if needed"""
+        from seamless.diagnostics import record
+        record("hash", nbytes=len(self)) if self._checksum is None else None
         from .checksum.cached_calculate_checksum import (
             cached_calculate_checksum_sync as cached_calculate_checksum,
         )
@@ -116,6 +121,8 @@ class Buffer:
 
     async def get_checksum_async(self) -> Checksum:
         """Returns the buffer's Checksum object, calculating it asynchronously if needed"""
+        from seamless.diagnostics import record
+        record("hash", nbytes=len(self)) if self._checksum is None else None
         from .checksum.cached_calculate_checksum import (
             cached_calculate_checksum,
         )
@@ -173,9 +180,26 @@ class Buffer:
         get_buffer_cache().incref(checksum, buffer=self)
 
     def decref(self):
-        """Decrement normal refcount in the buffer cache. If no refs remain (and no tempref), may be uncached."""
+        """Decrement a normal cache ref and return whether one was held."""
+
         checksum = self.get_checksum()
-        checksum.decref()
+        return checksum.decref()
+
+    def incref_refholder(self, *, scratch: bool = False) -> None:
+        """Acquire an internal lifecycle reference for this buffer's checksum."""
+
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        checksum = self.get_checksum()
+        get_buffer_cache().incref_refholder(
+            checksum, buffer=self, scratch=scratch
+        )
+
+    def decref_refholder(self) -> bool:
+        """Release an internal lifecycle reference for this buffer's checksum."""
+
+        checksum = self.get_checksum()
+        return checksum.decref_refholder()
 
     def tempref(
         self,

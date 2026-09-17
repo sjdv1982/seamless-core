@@ -40,5 +40,18 @@ def calculate_dict_checksum(d: dict) -> str:  # pylint: disable=redefined-builti
 
 
 TRIVIAL_CHECKSUMS = {
-    calculate_checksum(b): b for b in (b"", b"{}", b"{}\n", b"[]", b"[]\n")
+    calculate_checksum(b): b
+    for b in (
+        b"null",
+        b"null\n",
+        b"true",
+        b"false",
+        b"true\n",
+        b"false\n",
+        b"",
+        b"{}",
+        b"{}\n",
+        b"[]",
+        b"[]\n",
+    )
 }

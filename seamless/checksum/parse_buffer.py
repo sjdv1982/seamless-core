@@ -1,10 +1,9 @@
 """Functions to parse a buffer into a value"""
 
-import builtins
 import logging
 from copy import deepcopy
-import json
 import ast
+import math
 import orjson
 import yaml
 from seamless import Buffer, Checksum
@@ -13,11 +12,7 @@ from seamless.util.get_event_loop import get_event_loop
 from seamless.util.ipython import ipython2python
 from ..util import lrucache2
 from .celltypes import celltypes, text_types2
-
-"""
-TODO: buffer info
-from .buffer_cache import buffer_cache, BufferInfo
-"""
+from .virtual import NOT_VIRTUAL, virtual_value
 
 from .serialize import serialize_cache
 
@@ -37,12 +32,61 @@ def _parse_buffer_plain(buffer):
     s = s.rstrip("\n")
     try:
         value = orjson.loads(s)
-    except json.JSONDecodeError:
+    except orjson.JSONDecodeError:
         msg = s
         if len(msg) > 1000:
             msg = s[:920] + "..." + s[-50:]
         raise ValueError(msg) from None
     return value
+
+
+def _parse_scalar(buffer: Buffer, celltype: str):
+    """Parse a JSON scalar according to the checksum reference contract."""
+
+    if celltype in ("int", "float") and len(buffer) > 1000:
+        raise ValueError("Numeric scalar buffer is longer than 1000 bytes")
+
+    # ``_parse_buffer_plain`` deliberately uses orjson, so numeric JSON is
+    # interpreted in the same way as the HashType producer and conversion
+    # engine.  In particular, large unquoted JSON integers become floats.
+    value = _parse_buffer_plain(buffer)
+
+    if celltype == "str":
+        if value is None or isinstance(value, (dict, list)):
+            raise ValueError("JSON value cannot be interpreted as str")
+        if isinstance(value, (str, int, float, bool)):
+            return str(value)
+        raise ValueError("JSON value cannot be interpreted as str")
+
+    if celltype == "bool":
+        # Canonical boolean buffers are handled by ``virtual_value`` before
+        # this function is reached.  No content-based coercion is permitted.
+        raise ValueError("checksum does not encode a boolean value")
+
+    if isinstance(value, str):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("JSON string is not a finite number") from None
+        if not math.isfinite(numeric_value):
+            raise ValueError("JSON string is not a finite number")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("JSON number is not finite")
+    else:
+        raise ValueError("JSON value is not a number")
+
+    if celltype == "float":
+        return float(value)
+
+    assert celltype == "int"
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as original_error:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            raise original_error from None
 
 
 def validate_text(text: str, celltype: str, code_filename):
@@ -83,19 +127,30 @@ def validate_text_celltype(text, checksum: Checksum, celltype: str):
 
 
 def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
-    from seamless.checksum_class import validate_checksum
+    from .hash_type_validation import (
+        _deserialization_error,
+        validate_deserializable_as,
+    )
 
     if celltype not in celltypes:
         raise TypeError(celltype)
     checksum = Checksum(checksum)
+    value = virtual_value(checksum, celltype)
+    if value is not NOT_VIRTUAL:
+        return value
     logger.debug(
         "DESERIALIZE: buffer of length {}, checksum {}".format(len(buffer), checksum)
     )
+    hash_type = validate_deserializable_as(checksum, celltype, buffer=buffer)
+    assert hash_type is not None
     if celltype in text_types2:
         s = buffer.decode()
         value = s.rstrip("\n")
         if checksum and validate_text_celltype is not None:
-            validate_text_celltype(value, checksum, celltype)
+            try:
+                validate_text_celltype(value, checksum, celltype)
+            except ValueError:
+                raise _deserialization_error(checksum, hash_type, celltype) from None
     elif celltype == "plain":
         value = _parse_buffer_plain(buffer.content)
     elif celltype == "binary":
@@ -111,22 +166,13 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     elif celltype == "bytes":
         value = buffer
     elif celltype in ("str", "int", "float", "bool"):
-        value = _parse_buffer_plain(buffer)
-        if not isinstance(value, getattr(builtins, celltype)):
-            value = getattr(builtins, celltype)(value)
+        value = _parse_scalar(buffer, celltype)
     elif celltype == "checksum":
+        # HashType admits only a 64-byte buffer: the bare hex digest.
         try:
-            value = buffer.decode()
-            if validate_checksum is not None:
-                validate_checksum(value)
-        except (ValueError, UnicodeDecodeError):
-            from ..util.mixed.io import deserialize as mixed_deserialize
-
-            value, storage = mixed_deserialize(buffer)
-            if storage != "pure-plain":
-                raise TypeError from None
-            if validate_checksum is not None:
-                validate_checksum(value)
+            value = Checksum(buffer.content.decode())
+        except (TypeError, ValueError, UnicodeDecodeError):
+            raise _deserialization_error(checksum, hash_type, celltype) from None
     else:
         raise NotImplementedError(celltype)
 
@@ -142,19 +188,10 @@ async def parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str, copy: 
     In case of a cache miss, deserialization is performed in a subprocess
      (and copy is irrelevant).
     """
+    from seamless.diagnostics import record
+    record("deserialize", checksum, celltype, len(buffer))
     if buffer is None:
         return None
-    """
-    # TODO: buffer info
-    buffer_info = None
-    if buffer_cache is not None:
-        buffer_info = buffer_cache.buffer_info.get(checksum)
-        if buffer_info is not None:
-            if buffer_info.is_json:
-                celltype = "plain"
-            elif buffer_info.is_numpy:
-                celltype = "binary"
-    """
     value = parse_buffer_cache.get((checksum, celltype))
     if value is not None and not copy:
         return value
@@ -189,17 +226,8 @@ def parse_buffer_sync(buffer: Buffer, checksum: Checksum, celltype: str, copy):
     (and copy is irrelevant).
 
     This function can be executed if the asyncio event loop is already running"""
-
-    """
-    # TODO: buffer info
-    if buffer_cache is not None and celltype == "mixed":
-        buffer_info: BufferInfo | None = buffer_cache.buffer_info.get(checksum)
-        if buffer_info is not None:
-            if buffer_info.is_json:
-                celltype = "plain"
-            elif buffer_info.is_numpy:
-                celltype = "binary"
-    """
+    from seamless.diagnostics import record
+    record("deserialize", checksum, celltype, len(buffer))
 
     value = None
     if checksum:

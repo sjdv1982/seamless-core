@@ -18,6 +18,9 @@ def _serialize(value, celltype: str):
     from seamless import Checksum
     from .json_ import json_dumps_bytes
 
+    if value is None:
+        from .null import NULL_BUFFER
+        return NULL_BUFFER
     if isinstance(value, Checksum):
         value = value.hex()
     if celltype == "str":
@@ -52,7 +55,12 @@ def _serialize(value, celltype: str):
         if buffer is None:
             buffer = (str(value).rstrip("\n")).encode()
     elif celltype == "checksum":
-        buffer = json_dumps_bytes(value) + b"\n"
+        # The bare 64-character hex digest, without a newline.
+        if not isinstance(value, str):
+            raise TypeError(
+                f"A checksum value must be a Checksum or a hex string, not {type(value).__name__}"
+            )
+        buffer = Checksum(value).hex().encode()
     else:
         if celltype == "mixed":
             from ..util.mixed.io import serialize as mixed_serialize
@@ -70,6 +78,9 @@ def _serialize(value, celltype: str):
                 buffer = mixed_serialize(value)
         else:
             raise TypeError(celltype)
+    if celltype == "bytes" and buffer == b"":
+        from .null import NULL_BUFFER
+        buffer = NULL_BUFFER
     logger.debug("SERIALIZE: buffer of length {}".format(len(buffer)))
     return buffer
 
@@ -78,6 +89,8 @@ async def serialize(value, celltype: str, use_cache=True) -> bytes:
     """Serializes a value into a buffer
     The celltype must be one of the allowed celltypes.
     """
+    from seamless.diagnostics import record
+    record("serialize", celltype=celltype)
 
     assert value is not None
     if use_cache:
@@ -111,6 +124,8 @@ def serialize_sync(value, celltype: str, use_cache: bool = True) -> bytes:
     """Serializes a value into a buffer
     The celltype must be one of the allowed celltypes.
     This function can be executed if the asyncio event loop is already running"""
+    from seamless.diagnostics import record
+    record("serialize", celltype=celltype)
     if use_cache:
         id_value = id(value)
         buffer, _ = serialize_cache.get((id_value, celltype), (None, None))  # type: ignore

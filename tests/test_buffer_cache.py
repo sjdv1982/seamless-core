@@ -7,6 +7,7 @@ import pytest
 from seamless import Buffer
 from seamless.checksum_class import Checksum
 from seamless.caching import eviction_cost
+from tests.helpers.reference_lifecycle import cache_entry_state
 
 try:
     import seamless_remote.database_remote
@@ -60,8 +61,11 @@ def test_register_refs_and_eviction():
     eviction_cost.set_download_profile(c2, "read_buffer")
     cache.register(c1, buf1, size=size_small)
     cache.register(c2, buf2, size=size_big)
-    cache.incref(c1)
-    cache.incref(c2)
+    cache.tempref(c1)
+    cache.tempref(c2)
+
+    assert cache_entry_state(cache, c1)["manual_refs"] == 0
+    assert cache_entry_state(cache, c2)["manual_refs"] == 0
 
     stats_before = cache.stats()
     assert stats_before["strong_count"] == 2
@@ -78,7 +82,19 @@ def test_register_refs_and_eviction():
     # c1 should still be present in strong cache
     assert c1 in cache.strong_cache
 
-    cache.decref(c1)
+
+
+def test_decref_reports_refcount_underflow():
+    mod = load_buffer_cache_module()
+    cache = mod.BufferCache()
+    buffer = Buffer(b"decref-underflow")
+    checksum = buffer.get_checksum()
+    cache.register(checksum, buffer)
+
+    assert cache.decref(checksum) is False
+    cache.incref(checksum)
+    assert cache.decref(checksum) is True
+    assert cache.decref(checksum) is False
 
 
 def test_eviction_loop_start_stop():

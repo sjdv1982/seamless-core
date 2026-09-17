@@ -1,0 +1,766 @@
+"""Local expression evaluation over concrete checksums."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from collections.abc import Callable
+import ast
+import asyncio
+import concurrent.futures
+import threading
+import weakref
+from typing import Any
+
+from seamless.buffer_class import Buffer
+from seamless.checksum_class import Checksum
+
+
+class ExpressionEvaluationError(ValueError):
+    """Raised when an expression cannot be evaluated locally."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExpressionKey:
+    input_checksum: Checksum
+    path: str
+    input_celltype: str
+    celltype: str
+
+    def __post_init__(self):
+        from .null import canonicalize_checksum
+        object.__setattr__(self, "input_checksum",
+            canonicalize_checksum(self.input_checksum, self.input_celltype))
+
+
+_expression_cache: dict[tuple[str, str, str, str], Checksum] = {}
+_expression_result_buffers: weakref.WeakValueDictionary[Checksum, Buffer] = (
+    weakref.WeakValueDictionary()
+)
+_active_expression_lock = threading.RLock()
+_active_expressions: dict[tuple[str, str, str, str], "_ActiveExpression"] = {}
+
+
+@dataclass
+class _ActiveExpression:
+    result_future: concurrent.futures.Future
+    task: asyncio.Task | None
+    members: set[object]
+    canceled: bool = False
+
+
+def get_expression_cache() -> dict[tuple[str, str, str, str], Checksum]:
+    return _expression_cache
+
+
+def wait_for_active_expression(
+    input_checksum, path, input_celltype, celltype, *, validator=None,
+    validator_language=None,
+):
+    """Return an already-running expression's result, without starting one."""
+    cache_key = (Checksum(input_checksum).hex(), path, input_celltype, celltype)
+    local_key = ("local", *cache_key, str(validator), validator_language)
+    with _active_expression_lock:
+        active = _active_expressions.get(cache_key)
+        if active is None:
+            active = _active_expressions.get(local_key)
+        future = None if active is None else active.result_future
+    if future is None:
+        return None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return Checksum(future.result())
+    return None
+
+
+def choose_expression_evaluation_location(
+    input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
+) -> str:
+    """Choose local when no buffer is needed or it is in process memory.
+
+    Remote means absent from process memory, independently of backend availability.
+    """
+
+    from .convert import conversion_needs_buffer
+
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    if not path and not conversion_needs_buffer(
+        key.input_checksum, key.input_celltype, key.celltype
+    ):
+        return "local"
+
+    from seamless import CacheMissError
+
+    try:
+        _get_local_buffer(key.input_checksum)
+    except CacheMissError:
+        return "remote"
+    return "local"
+
+
+def evaluate_expression(
+    input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
+    *,
+    validator: Checksum | str | bytes | None = None,
+    validator_language: str | None = None,
+) -> Checksum:
+    """Evaluate an expression locally and return the result checksum."""
+
+    if validator is not None or validator_language is not None:
+        # TODO validators: reject-only gate, excluded from expression identity.
+        raise NotImplementedError("Expression validators are not implemented yet")
+
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    cache_key = _cache_key(key)
+    key.input_checksum.tempref()
+    cached = _expression_cache.get(cache_key)
+    if cached is not None:
+        _publish_expression_result(cached)
+        return cached
+
+    steps = parse_path(key.path)
+    get_buffer = _local_buffer_getter(key.input_checksum)
+    input_buffer = get_buffer() if steps else None
+    from .hash_type_validation import validate_expression
+
+    validate_expression(
+        key.input_checksum,
+        buffer=input_buffer,
+        source_celltype=key.input_celltype,
+        path_steps=steps,
+        target_celltype=key.celltype,
+    )
+    return _evaluate_expression_after_validation(
+        key, input_buffer, steps, cache_key, get_buffer
+    )
+
+
+async def evaluate_expression_async(
+    input_checksum,
+    path,
+    input_celltype,
+    celltype,
+    *,
+    validator=None,
+    validator_language=None,
+):
+    """Share one local evaluator task for each complete Expression identity."""
+    key = (
+        "local",
+        Checksum(input_checksum).hex(),
+        path,
+        input_celltype,
+        celltype,
+        str(validator),
+        validator_language,
+    )
+    member = object()
+    with _active_expression_lock:
+        active = _active_expressions.get(key)
+        if active is None or active.result_future.done():
+            active = _ActiveExpression(concurrent.futures.Future(), None, set())
+            _active_expressions[key] = active
+
+            async def execute():
+                try:
+                    result = await _evaluate_expression_async(
+                        input_checksum,
+                        path,
+                        input_celltype,
+                        celltype,
+                        validator=validator,
+                        validator_language=validator_language,
+                    )
+                except BaseException as exc:
+                    if not active.result_future.done():
+                        active.result_future.set_exception(exc)
+                else:
+                    if not active.result_future.done():
+                        active.result_future.set_result(result)
+                finally:
+                    with _active_expression_lock:
+                        if _active_expressions.get(key) is active:
+                            _active_expressions.pop(key, None)
+
+            active.task = asyncio.create_task(execute())
+            active.task.add_done_callback(
+                lambda task: _discard_active_expression(key, active)
+            )
+        active.members.add(member)
+    try:
+        return await asyncio.shield(asyncio.wrap_future(active.result_future))
+    finally:
+        softcancel_expression(key, member)
+
+
+_expression_evaluations = 0
+
+
+async def _evaluate_expression_async(
+    input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
+    *,
+    validator: Checksum | str | bytes | None = None,
+    validator_language: str | None = None,
+) -> Checksum:
+    if validator is not None or validator_language is not None:
+        # TODO validators: reject-only gate, excluded from expression identity.
+        raise NotImplementedError("Expression validators are not implemented yet")
+
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    cache_key = _cache_key(key)
+    key.input_checksum.tempref()
+    cached = _expression_cache.get(cache_key)
+    if cached is not None:
+        _publish_expression_result(cached)
+        return cached
+
+    global _expression_evaluations
+    _expression_evaluations += 1
+    steps = parse_path(key.path)
+    from .convert import conversion_needs_buffer
+    from .hash_type_validation import validate_expression_async
+    from .null import canonicalize_checksum, is_null
+
+    needs_buffer = bool(steps)
+    if (
+        not steps
+        and key.input_celltype != key.celltype
+        and not is_null(canonicalize_checksum(key.input_checksum, key.celltype))
+    ):
+        needs_buffer = conversion_needs_buffer(
+            key.input_checksum, key.input_celltype, key.celltype
+        )
+    input_buffer = await key.input_checksum.resolution() if needs_buffer else None
+
+    def get_buffer() -> Buffer:
+        if input_buffer is None:
+            raise ExpressionEvaluationError(
+                "Conversion unexpectedly requested an unresolved input buffer"
+            )
+        return input_buffer
+
+    await validate_expression_async(
+        key.input_checksum,
+        buffer=input_buffer,
+        source_celltype=key.input_celltype,
+        path_steps=steps,
+        target_celltype=key.celltype,
+    )
+    return _evaluate_expression_after_validation(
+        key, input_buffer, steps, cache_key, get_buffer
+    )
+
+
+def _has_daskserver():
+    try:
+        from seamless_remote.daskserver_remote import has_daskserver
+    except ImportError:
+        return False
+    return has_daskserver()
+
+
+async def evaluate_expression_remote(
+    input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
+    *,
+    validator: Checksum | str | bytes | None = None,
+    validator_language: str | None = None,
+    execution: str = "auto",
+    member_id: object | None = None,
+) -> Checksum:
+    """Evaluate an expression with remote cache lookup and optional jobserver dispatch."""
+
+    if validator is not None or validator_language is not None:
+        # TODO validators: reject-only gate, excluded from expression identity.
+        raise NotImplementedError("Expression validators are not implemented yet")
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    cache_key = _cache_key(key)
+    key.input_checksum.tempref()
+    cached = _expression_cache.get(cache_key)
+    if cached is not None:
+        _publish_expression_result(cached)
+        return cached
+
+    try:
+        from seamless_remote import database_remote
+    except ImportError:
+        database_remote = None
+    if database_remote is not None:
+        result = await database_remote.get_expression_result(
+            key.input_checksum,
+            key.path,
+            key.input_celltype,
+            key.celltype,
+        )
+        if result is not None:
+            _expression_cache[cache_key] = result
+            _publish_expression_result(result)
+            return result
+
+    location = execution
+    if location == "auto":
+        location = choose_expression_evaluation_location(
+            key.input_checksum, key.path, key.input_celltype, key.celltype
+        )
+        if location == "remote":
+            try:
+                from seamless_remote import jobserver_remote
+            except ImportError:
+                location = "local"
+            else:
+                if not jobserver_remote.has_jobserver() and not _has_daskserver():
+                    location = "local"
+    if location == "local":
+        result = await evaluate_expression_async(
+            key.input_checksum,
+            key.path,
+            key.input_celltype,
+            key.celltype,
+        )
+    elif location == "remote":
+        return await _run_active_remote_expression(
+            key,
+            cache_key,
+            database_remote=database_remote,
+            member_id=member_id,
+        )
+    else:
+        raise ValueError(f"Unknown expression execution location: {location!r}")
+
+    result = Checksum(result)
+    _expression_cache[cache_key] = result
+    _publish_expression_result(result)
+    if database_remote is not None:
+        await database_remote.set_expression_result(
+            key.input_checksum,
+            key.path,
+            key.input_celltype,
+            key.celltype,
+            result,
+        )
+    return result
+
+
+async def _run_active_remote_expression(
+    key: ExpressionKey,
+    cache_key: tuple[str, str, str, str],
+    *,
+    database_remote,
+    member_id: object | None,
+) -> Checksum:
+    member = object() if member_id is None else member_id
+    with _active_expression_lock:
+        active = _active_expressions.get(cache_key)
+        if active is not None and active.result_future.done():
+            _active_expressions.pop(cache_key, None)
+            active = None
+        if active is None:
+            active = _ActiveExpression(
+                result_future=concurrent.futures.Future(),
+                task=None,
+                members=set(),
+            )
+            active.task = asyncio.create_task(
+                _execute_remote_expression(key, cache_key, active, database_remote)
+            )
+            _active_expressions[cache_key] = active
+            active.task.add_done_callback(lambda task: _discard_active_expression(cache_key, active))
+        active.members.add(member)
+    try:
+        return await asyncio.shield(asyncio.wrap_future(active.result_future))
+    finally:
+        softcancel_expression(cache_key, member)
+
+
+async def _execute_remote_expression(
+    key: ExpressionKey,
+    cache_key: tuple[str, str, str, str],
+    active: _ActiveExpression,
+    database_remote,
+) -> None:
+    try:
+        try:
+            from seamless_remote import jobserver_remote
+        except ImportError as exc:
+            raise ExpressionEvaluationError(
+                "Remote expression evaluation requires seamless_remote"
+            ) from exc
+        dispatch = jobserver_remote.run_expression
+        if not jobserver_remote.has_jobserver() and _has_daskserver():
+            from seamless_remote import daskserver_remote
+            dispatch = daskserver_remote.run_expression
+        result = await dispatch(
+            key.input_checksum,
+            key.path,
+            key.input_celltype,
+            key.celltype,
+        )
+        result = Checksum(result)
+        _expression_cache[cache_key] = result
+        _publish_expression_result(result)
+        if database_remote is not None:
+            await database_remote.set_expression_result(
+                key.input_checksum,
+                key.path,
+                key.input_celltype,
+                key.celltype,
+                result,
+            )
+    except asyncio.CancelledError as exc:
+        active.canceled = True
+        if not active.result_future.done():
+            active.result_future.set_exception(exc)
+        raise
+    except BaseException as exc:
+        if not active.result_future.done():
+            active.result_future.set_exception(exc)
+    else:
+        if not active.result_future.done():
+            active.result_future.set_result(result)
+    finally:
+        with _active_expression_lock:
+            if _active_expressions.get(cache_key) is active:
+                _active_expressions.pop(cache_key, None)
+
+
+def _discard_active_expression(key, active):
+    with _active_expression_lock:
+        if _active_expressions.get(key) is active:
+            _active_expressions.pop(key, None)
+    if not active.result_future.done():
+        active.result_future.set_exception(asyncio.CancelledError())
+
+
+def softcancel_expression(
+    cache_key: tuple[str, str, str, str], member_id: object | None
+) -> bool:
+    if member_id is None:
+        return False
+    with _active_expression_lock:
+        active = _active_expressions.get(cache_key)
+        if active is None or member_id not in active.members:
+            return False
+        active.members.remove(member_id)
+        should_cancel = not active.members and not active.result_future.done()
+        if should_cancel:
+            active.canceled = True
+    if not should_cancel:
+        return True
+    if active.task is not None and not active.task.done():
+        active.task.get_loop().call_soon_threadsafe(active.task.cancel)
+    if not active.result_future.done():
+        active.result_future.set_exception(asyncio.CancelledError())
+    return True
+
+
+def cancel_expression(
+    input_checksum: Checksum | str | bytes,
+    path: str,
+    input_celltype: str,
+    celltype: str,
+    *,
+    member_id: object | None = None,
+) -> bool:
+    key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    return softcancel_expression(_cache_key(key), member_id)
+
+
+def _evaluate_expression_after_validation(
+    key: ExpressionKey,
+    input_buffer: Buffer | None,
+    steps: tuple[tuple[str, Any], ...],
+    cache_key: tuple[str, str, str, str],
+    get_buffer: Callable[[], Buffer],
+) -> Checksum:
+    from .null import canonicalize_checksum, is_null, NULL_BUFFER
+
+    if not steps and is_null(canonicalize_checksum(key.input_checksum, key.celltype)):
+        result_buffer = Buffer(NULL_BUFFER)
+        result = result_buffer.get_checksum()
+        _expression_cache[cache_key] = result
+        _publish_expression_result(result, buffer=result_buffer)
+        return result
+    if key.path == "" and key.input_celltype == key.celltype:
+        # Validation rejects known structural incompatibilities without requiring
+        # source content for an identity expression.
+        _expression_cache[cache_key] = key.input_checksum
+        _publish_expression_result(key.input_checksum, buffer=input_buffer)
+        return key.input_checksum
+
+    if not steps:
+        from .convert import convert_checksum
+
+        result_checksum, result_buffer = convert_checksum(
+            key.input_checksum, key.input_celltype, key.celltype, get_buffer
+        )
+        if result_buffer is not None:
+            if result_buffer.get_checksum() != result_checksum:
+                raise ExpressionEvaluationError("Conversion result checksum mismatch")
+            _expression_result_buffers[result_checksum] = result_buffer
+        _expression_cache[cache_key] = result_checksum
+        _publish_expression_result(result_checksum, buffer=result_buffer)
+        return result_checksum
+
+    assert input_buffer is not None
+    value = _deserialize_for_expression(input_buffer, key.input_celltype)
+    if key.input_celltype == "binary" and steps:
+        ndim = getattr(value, "ndim", None)
+        fields = getattr(getattr(value, "dtype", None), "fields", None)
+        map_only = fields and all(
+            kind == "item" and isinstance(payload, str) for kind, payload in steps
+        )
+        if (ndim is None or ndim == 0) and not map_only:
+            raise ExpressionEvaluationError("Cannot apply a path to a binary scalar")
+
+    for step in steps:
+        value = _apply_step(value, step)
+
+    result_buffer = _serialize_expression_result(value, key.celltype)
+    result_checksum = result_buffer.get_checksum()
+    _expression_cache[cache_key] = result_checksum
+    _expression_result_buffers[result_checksum] = result_buffer
+    _publish_expression_result(result_checksum, buffer=result_buffer)
+    return result_checksum
+
+
+def _publish_expression_result(
+    checksum: Checksum, *, buffer: Buffer | None = None
+) -> None:
+    """Publish bounded cache interest for every successful result path."""
+
+    checksum = Checksum(checksum)
+    if buffer is None:
+        checksum.tempref()
+    else:
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        from .hash_type import register_hash_type_for_buffer
+        register_hash_type_for_buffer(checksum, buffer)
+        get_buffer_cache().tempref(checksum, buffer=buffer)
+
+
+def resolve_expression_value(
+    result_checksum: Checksum | str | bytes,
+    celltype: str,
+) -> Any:
+    """Materialize a result like ``.value``: local buffers, then ``Checksum.resolve()``.
+
+    ``resolve()`` also asks the hashserver, so a result computed elsewhere
+    materializes; it raises ``CacheMissError`` when no buffer is found.
+    """
+    from seamless import CacheMissError
+
+    checksum = Checksum(result_checksum)
+    try:
+        buffer = _get_local_buffer(checksum)
+    except CacheMissError:
+        buffer = checksum.resolve()
+    return _deserialize_for_expression(buffer, celltype)
+
+
+def parse_path(path: str) -> tuple[tuple[str, Any], ...]:
+    if not path:
+        return ()
+    steps: list[tuple[str, Any]] = []
+    index = 0
+    while index < len(path):
+        char = path[index]
+        if char == ".":
+            index += 1
+            start = index
+            while index < len(path) and (
+                path[index] == "_" or path[index].isalnum()
+            ):
+                index += 1
+            name = path[start:index]
+            if not name or not name.isidentifier():
+                raise ExpressionEvaluationError(f"Invalid path segment at {start}")
+            steps.append(("item", name))
+        elif char == "[":
+            stop = _find_closing_bracket(path, index)
+            token = path[index + 1 : stop]
+            steps.append(_parse_bracket_token(token))
+            index = stop + 1
+        else:
+            start = index
+            while index < len(path) and (
+                path[index] == "_" or path[index].isalnum()
+            ):
+                index += 1
+            name = path[start:index]
+            if not name or not name.isidentifier():
+                raise ExpressionEvaluationError(f"Invalid path segment at {start}")
+            steps.append(("item", name))
+    return tuple(steps)
+
+
+def _cache_key(key: ExpressionKey) -> tuple[str, str, str, str]:
+    return (
+        key.input_checksum.hex(),
+        key.path,
+        key.input_celltype,
+        key.celltype,
+    )
+
+
+def _local_buffer_getter(checksum: Checksum) -> Callable[[], Buffer]:
+    """Keep one local buffer lookup lazy and retain its result for evaluation."""
+
+    from seamless import CacheMissError
+
+    buffer: Buffer | None = None
+    error: CacheMissError | None = None
+
+    def get_buffer() -> Buffer:
+        nonlocal buffer, error
+        if error is not None:
+            raise error
+        if buffer is None:
+            try:
+                buffer = _get_local_buffer(checksum)
+            except CacheMissError as exc:
+                error = exc
+                raise
+        return buffer
+
+    return get_buffer
+
+
+def _get_local_buffer(checksum: Checksum) -> Buffer:
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless.checksum.cached_calculate_checksum import checksum_cache
+
+    from .calculate_checksum import TRIVIAL_CHECKSUMS
+    trivial = TRIVIAL_CHECKSUMS.get(checksum.hex())
+    if trivial is not None:
+        return Buffer(trivial)
+    buffer = get_buffer_cache().get(checksum)
+    if buffer is not None:
+        return buffer
+
+    buffer = _expression_result_buffers.get(checksum)
+    if buffer is not None:
+        return buffer
+
+    raw = checksum_cache.get(checksum)
+    if raw is not None:
+        return Buffer(raw, checksum=checksum)
+
+    from seamless import CacheMissError
+
+    raise CacheMissError(checksum)
+
+
+def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:
+    if input_celltype == "bytes":
+        from .null import NULL_BUFFER
+        return b"" if buffer.content == NULL_BUFFER else buffer.content
+    return buffer.get_value(input_celltype)
+
+
+def _serialize_expression_result(value: Any, celltype: str) -> Buffer:
+    if celltype == "binary" and isinstance(value, bytes):
+        import numpy as np
+
+        return Buffer(np.array(value), "binary")
+    result = Buffer(value, celltype)
+    if celltype == "binary":
+        from seamless.util.mixed import MAGIC_NUMPY
+
+        if not result.content.startswith(MAGIC_NUMPY):
+            raise ExpressionEvaluationError(
+                "Expression result is not serializable as binary"
+            )
+    return result
+
+
+def _find_closing_bracket(path: str, start: int) -> int:
+    quote: str | None = None
+    escape = False
+    for index in range(start + 1, len(path)):
+        char = path[index]
+        if quote is not None:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "]":
+            return index
+    raise ExpressionEvaluationError(f"Unclosed path bracket at {start}")
+
+
+def _parse_bracket_token(token: str) -> tuple[str, Any]:
+    if ":" in token:
+        return ("slice", _parse_slice(token))
+    try:
+        key = ast.literal_eval(token)
+    except (SyntaxError, ValueError) as exc:
+        raise ExpressionEvaluationError(f"Invalid item path token [{token}]") from exc
+    return ("item", key)
+
+
+def _parse_slice(token: str) -> slice:
+    parts = token.split(":")
+    if len(parts) > 3:
+        raise ExpressionEvaluationError(f"Invalid slice path token [{token}]")
+    values = []
+    for part in parts:
+        if part == "":
+            values.append(None)
+        else:
+            try:
+                values.append(ast.literal_eval(part))
+            except (SyntaxError, ValueError) as exc:
+                raise ExpressionEvaluationError(
+                    f"Invalid slice path token [{token}]"
+                ) from exc
+    while len(values) < 3:
+        values.append(None)
+    return slice(values[0], values[1], values[2])
+
+
+def _apply_step(value: Any, step: tuple[str, Any]) -> Any:
+    kind, payload = step
+    try:
+        if kind == "slice":
+            return value[payload]
+        if kind == "item":
+            if isinstance(payload, str):
+                if isinstance(value, dict):
+                    return value[payload]
+                if hasattr(value, "dtype") and getattr(value.dtype, "fields", None):
+                    return value[payload]
+                return getattr(value, payload)
+            return value[payload]
+    except Exception as exc:
+        raise ExpressionEvaluationError(
+            f"Cannot apply expression path step {payload!r}"
+        ) from exc
+    raise ExpressionEvaluationError(f"Unknown expression path step {kind!r}")
+
+
+__all__ = [
+    "ExpressionEvaluationError",
+    "choose_expression_evaluation_location",
+    "evaluate_expression",
+    "evaluate_expression_async",
+    "evaluate_expression_remote",
+    "get_expression_cache",
+    "parse_path",
+    "resolve_expression_value",
+]

@@ -15,6 +15,7 @@ subsystem integrations.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 import weakref
@@ -34,6 +35,8 @@ DEFAULT_SOFT_CAP = 5 * 1024**3
 DEFAULT_HARD_CAP = 50 * 1024**3
 DEFAULT_BENEFIT_PER_GB = 2.0
 TEMPREF_MINIMAL_INTEREST = 1 / 128
+_MEMORY_PRESSURE_WARNING_INTERVAL = 60.0
+_references_logger = logging.getLogger("seamless.references")
 
 
 @dataclass
@@ -65,13 +68,14 @@ class TempRef:
 class StrongEntry:
     buffer: Optional[Buffer] = None
     size: Optional[int] = None  # bytes
-    normal_refs: int = 0
+    manual_refs: int = 0
+    has_refholder_bridge: bool = False
     tempref: Optional[TempRef] = None
     tempref_scratch: bool = False
     remote_registered: bool = False
 
     def interest(self) -> float:
-        i = float(self.normal_refs)
+        i = float(self.manual_refs + int(self.has_refholder_bridge))
         if self.tempref is not None:
             i += self.tempref.current_interest()
         return i
@@ -111,6 +115,9 @@ class BufferCache:
         self._sizes: Dict[Checksum, Optional[int]] = {}
         # track checksums that only have scratch refs
         self._scratch_refs: set[Checksum] = set()
+        self.refholder_counts: Dict[Checksum, int] = {}
+        self._memory_pressure_warning_at = 0.0
+        self._memory_pressure_warning_state = None
 
     # --- registration & lookup ---
     def register(
@@ -125,6 +132,7 @@ class BufferCache:
         - buffer: object to store (can be any Python object)
         - size: optional length in bytes. If None, treated as unknown (infinite cost)
         """
+        write_buffer = None
         with self.lock:
             if size is None:
                 size = getattr(buffer, "length", None)
@@ -141,9 +149,11 @@ class BufferCache:
             if entry is not None:
                 if buffer is not None and entry.buffer is None:
                     if entry.remote_registered:
-                        buffer_writer.register(buffer)
+                        write_buffer = buffer
                 entry.buffer = buffer
                 entry.size = size
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
 
     def get(self, checksum: Checksum) -> Optional[Buffer]:
         """Return buffer if present in strong or weak caches (promotes to strong if refs exist)."""
@@ -162,6 +172,80 @@ class BufferCache:
             return buf
 
     # --- refs management ---
+    def _ensure_entry_locked(
+        self,
+        checksum: Checksum,
+        *,
+        buffer: Optional[Buffer] = None,
+        scratch: bool = False,
+    ) -> tuple[StrongEntry, Optional[Buffer]]:
+        """Return the entry and any buffer to register after releasing the lock.
+
+        Writer registration may import modules being imported by a thread whose
+        GC finalizers need this lock. Complete reference accounting first, then
+        register outside the lock to avoid that lock cycle.
+        """
+
+        write_buffer = None
+        write_remote = not scratch
+        if buffer is None:
+            buffer = self.weak_cache.get(checksum)
+        if buffer is not None:
+            buffer.get_checksum()
+            assert buffer.checksum == checksum
+        entry = self.strong_cache.get(checksum)
+        if entry is None:
+            size = self._sizes.get(checksum)
+            if size is None and buffer is not None:
+                size = getattr(buffer, "length", None)
+            if size is not None:
+                self._sizes[checksum] = size
+                eviction_cost.register_buffer_length(checksum, size)
+            entry = StrongEntry(buffer=buffer, size=size)
+            entry.remote_registered = write_remote
+            if buffer is not None and write_remote:
+                write_buffer = buffer
+            self.strong_cache[checksum] = entry
+            eviction_cost.add_interest(checksum)
+        elif entry.buffer is None and buffer is not None:
+            entry.buffer = buffer
+            if write_remote:
+                entry.remote_registered = True
+                write_buffer = buffer
+        if write_remote and not entry.remote_registered:
+            entry.remote_registered = True
+            if entry.buffer is not None:
+                write_buffer = entry.buffer
+        return entry, write_buffer
+
+    def _has_live_tempref_locked(self, entry: StrongEntry) -> bool:
+        if entry.tempref is None:
+            return False
+        return entry.tempref.current_interest() >= TEMPREF_MINIMAL_INTEREST
+
+    def _can_demote_locked(self, entry: StrongEntry) -> bool:
+        return (
+            entry.manual_refs == 0
+            and not entry.has_refholder_bridge
+            and not self._has_live_tempref_locked(entry)
+        )
+
+    def _eviction_protected_locked(self, entry: StrongEntry) -> bool:
+        """Return whether an entry is protected from memory-pressure eviction."""
+
+        return entry.manual_refs != 0 or entry.has_refholder_bridge
+
+    def _demote_locked(self, checksum: Checksum, entry: StrongEntry) -> bool:
+        if not self._can_demote_locked(entry):
+            return False
+        buf = entry.buffer
+        if buf is not None:
+            self.weak_cache[checksum] = buf
+        if self.strong_cache.get(checksum) is entry:
+            del self.strong_cache[checksum]
+            eviction_cost.remove_interest(checksum)
+        return True
+
     def incref(
         self,
         checksum: Checksum,
@@ -173,59 +257,108 @@ class BufferCache:
 
         If scratch is True, keep the ref scratch-only (no remote registration).
         """
-        write_remote = not scratch
-        if scratch:
-            self._scratch_refs.add(checksum)
-        else:
-            self._scratch_refs.discard(checksum)
-        # buffer may be in weak cache
-        if buffer is None:
-            buffer = self.weak_cache.get(checksum)
-        if buffer is not None:
-            buffer.get_checksum()
-            assert buffer.checksum == checksum
         with self.lock:
-            entry = self.strong_cache.get(checksum)
-            if entry is None:
-                # create strong entry
-                size = self._sizes.get(checksum)
-                if size is None and buffer is not None:
-                    size = getattr(buffer, "length", None)
-                if size is not None:
-                    self._sizes[checksum] = size
-                    eviction_cost.register_buffer_length(checksum, size)
-                entry = StrongEntry(buffer=buffer, size=size)
-                entry.remote_registered = write_remote
-                if buffer is not None and write_remote:
-                    buffer_writer.register(buffer)
-                self.strong_cache[checksum] = entry
-                eviction_cost.add_interest(checksum)
-            elif entry.buffer is None:
-                entry.buffer = buffer
-                if write_remote:
-                    entry.remote_registered = True
-                    if buffer is not None:
-                        buffer_writer.register(buffer)
-            if write_remote and not entry.remote_registered:
-                entry.remote_registered = True
-                if buffer is not None:
-                    buffer_writer.register(buffer)
-            entry.normal_refs += 1
+            if scratch:
+                self._scratch_refs.add(checksum)
+            else:
+                self._scratch_refs.discard(checksum)
+            entry, write_buffer = self._ensure_entry_locked(
+                checksum, buffer=buffer, scratch=scratch
+            )
+            entry.manual_refs += 1
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
 
-    def decref(self, checksum: Checksum) -> None:
-        """Decrement normal refcount. If no refs remain (and no tempref), demote to weak."""
+    def decref(self, checksum: Checksum) -> bool:
+        """Decrement a normal refcount and report whether one was held."""
         with self.lock:
             entry = self.strong_cache.get(checksum)
-            if entry is None:
-                return
-            entry.normal_refs = max(0, entry.normal_refs - 1)
-            if entry.normal_refs == 0 and entry.tempref is None:
-                # demote: buffer stays in weak cache
-                buf = entry.buffer
-                if buf is not None:
-                    self.weak_cache[checksum] = buf
-                del self.strong_cache[checksum]
-                eviction_cost.remove_interest(checksum)
+            if entry is None or entry.manual_refs == 0:
+                _references_logger.warning(
+                    "Manual decref ignored for checksum %s: manual refcount is already zero",
+                    checksum.hex(),
+                )
+                return False
+            entry.manual_refs -= 1
+            self._demote_locked(checksum, entry)
+            return True
+
+    def incref_refholder(
+        self,
+        checksum: Checksum,
+        *,
+        buffer: Optional[Buffer] = None,
+        scratch: bool = False,
+    ) -> None:
+        """Acquire one logical lifecycle reference for ``checksum``."""
+
+        with self.lock:
+            if scratch:
+                self._scratch_refs.add(checksum)
+            else:
+                self._scratch_refs.discard(checksum)
+            entry, write_buffer = self._ensure_entry_locked(
+                checksum, buffer=buffer, scratch=scratch
+            )
+            count = self.refholder_counts.get(checksum, 0)
+            if count == 0:
+                entry.has_refholder_bridge = True
+            self.refholder_counts[checksum] = count + 1
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
+
+    def decref_refholder(self, checksum: Checksum) -> bool:
+        """Release one logical lifecycle reference for ``checksum``."""
+
+        with self.lock:
+            count = self.refholder_counts.get(checksum, 0)
+            entry = self.strong_cache.get(checksum)
+            if count == 0:
+                _references_logger.warning(
+                    "Refholder decref ignored for checksum %s: refholder count is already zero",
+                    checksum.hex(),
+                )
+                return False
+            if count == 1:
+                del self.refholder_counts[checksum]
+                if entry is not None:
+                    entry.has_refholder_bridge = False
+                    self._demote_locked(checksum, entry)
+            else:
+                self.refholder_counts[checksum] = count - 1
+            return True
+
+    def reference_snapshot(self) -> dict[Checksum, tuple[int, int, bool]]:
+        """Return lifecycle accounting copied while holding the cache lock."""
+
+        with self.lock:
+            checksums = set(self.refholder_counts)
+            checksums.update(self.strong_cache)
+            return {
+                checksum: (
+                    self.refholder_counts.get(checksum, 0),
+                    self.strong_cache.get(checksum).manual_refs
+                    if checksum in self.strong_cache
+                    else 0,
+                    self.strong_cache.get(checksum).has_refholder_bridge
+                    if checksum in self.strong_cache
+                    else False,
+                )
+                for checksum in checksums
+            }
+
+    def force_clear_reference_accounting(self) -> None:
+        """Clear residual lifecycle accounting during final shutdown cleanup."""
+
+        with self.lock:
+            self.refholder_counts.clear()
+            for checksum, entry in list(self.strong_cache.items()):
+                # Manual references are deliberately part of the final forced
+                # cleanup.  They are warned about by the shutdown audit before
+                # this method is called, but must not keep the cache alive.
+                entry.manual_refs = 0
+                entry.has_refholder_bridge = False
+                self._demote_locked(checksum, entry)
 
     def tempref(
         self,
@@ -241,39 +374,14 @@ class BufferCache:
 
         If scratch is True, keep the tempref scratch-only (no remote registration).
         """
-        write_remote = not scratch
-        if scratch:
-            self._scratch_refs.add(checksum)
-        else:
-            self._scratch_refs.discard(checksum)
-        # buffer may be in weak cache
-        if buffer is None:
-            buffer = self.weak_cache.get(checksum)
         with self.lock:
-            entry = self.strong_cache.get(checksum)
-            if entry is None:
-                size = self._sizes.get(checksum)
-                if size is None and buffer is not None:
-                    size = getattr(buffer, "length", None)
-                if size is not None:
-                    self._sizes[checksum] = size
-                    eviction_cost.register_buffer_length(checksum, size)
-                entry = StrongEntry(buffer=buffer, size=size)
-                entry.remote_registered = write_remote
-                if buffer is not None and write_remote:
-                    buffer_writer.register(buffer)
-                self.strong_cache[checksum] = entry
-                eviction_cost.add_interest(checksum)
-            elif entry.buffer is None:
-                entry.buffer = buffer
-                if write_remote:
-                    entry.remote_registered = True
-                    if buffer is not None:
-                        buffer_writer.register(buffer)
-            if write_remote and not entry.remote_registered:
-                entry.remote_registered = True
-                if buffer is not None:
-                    buffer_writer.register(buffer)
+            if scratch:
+                self._scratch_refs.add(checksum)
+            else:
+                self._scratch_refs.discard(checksum)
+            entry, write_buffer = self._ensure_entry_locked(
+                checksum, buffer=buffer, scratch=scratch
+            )
             if entry.tempref is None:
                 entry.tempref = TempRef(
                     interest=interest,
@@ -293,6 +401,8 @@ class BufferCache:
                     entry.tempref.fade_interval = fade_interval
                 entry.tempref.refresh()
                 entry.tempref_scratch = scratch
+        if write_buffer is not None:
+            buffer_writer.register(write_buffer)
         return entry.tempref
 
     def purge_scratch(self, checksum: Checksum | None = None) -> int:
@@ -316,7 +426,7 @@ class BufferCache:
                             pass
                         purged += 1
                     continue
-                if entry.normal_refs != 0:
+                if entry.manual_refs != 0 or entry.has_refholder_bridge:
                     continue
                 if entry.tempref is None or not entry.tempref_scratch:
                     continue
@@ -376,22 +486,19 @@ class BufferCache:
                     continue
                 if e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST:
                     e.tempref = None
-                    if e.normal_refs == 0:
-                        checksum = k
-                        # demote: buffer stays in weak cache
-                        buf = e.buffer
-                        if buf is not None:
-                            self.weak_cache[checksum] = buf
-                        del self.strong_cache[checksum]
-                        eviction_cost.remove_interest(checksum)
+                    self._demote_locked(k, e)
 
             before = self._strong_memory_usage()
             if before <= self.soft_cap:
                 return before, before
 
-            # Build candidate list (checksum, score)
+            # Build candidate list (checksum, score). Manual and refholder
+            # protection never becomes a candidate; a tempref is bounded cache
+            # interest and can be dropped under memory pressure.
             candidates = []
             for k, e in self.strong_cache.items():
+                if self._eviction_protected_locked(e):
+                    continue
                 score = self._candidate_score(k, e)
                 candidates.append((score, k, e))
 
@@ -407,19 +514,37 @@ class BufferCache:
                 # If score is +inf, skip (unknown sizes)
                 if score == float("inf"):
                     continue
-                # Evict this candidate
-                buf = e.buffer
-                if buf is not None:
-                    self.weak_cache[k] = buf
+                # Eviction discards bounded tempref interest before applying
+                # the common demotion predicate.
+                e.tempref = None
                 # subtract size
                 if e.size:
                     current -= int(e.size)
-                # remove strong entry but keep refs info
-                del self.strong_cache[k]
-                eviction_cost.remove_interest(k)
+                self._demote_locked(k, e)
                 # If we are above the hard cap, keep evicting aggressively (loop continues)
 
-            # If still above hard cap (because inf-sized entries prevented full eviction), we can't do more
+            if current > self.soft_cap:
+                protected = sum(
+                    self._eviction_protected_locked(entry)
+                    for entry in self.strong_cache.values()
+                )
+                state = (before, current, self.soft_cap, protected)
+                now = time.time()
+                if (
+                    state != self._memory_pressure_warning_state
+                    or now - self._memory_pressure_warning_at
+                    >= _MEMORY_PRESSURE_WARNING_INTERVAL
+                ):
+                    _references_logger.warning(
+                        "Memory pressure remains above cap: %d -> %d bytes, cap %d, %d protected entries",
+                        before,
+                        current,
+                        self.soft_cap,
+                        protected,
+                    )
+                    self._memory_pressure_warning_state = state
+                    self._memory_pressure_warning_at = now
+
             after = max(0, current)
             return before, after
 
