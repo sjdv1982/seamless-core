@@ -42,6 +42,13 @@ class Buffer:
                 )
             buf = value_or_buffer
         else:
+            from .checksum.deep import DEEP_CELLTYPES
+
+            if celltype in DEEP_CELLTYPES and isinstance(value_or_buffer, dict):
+                value_or_buffer = {
+                    k: v.hex() if isinstance(v, Checksum) else v
+                    for k, v in value_or_buffer.items()
+                }
             celltype = self._map_celltype(celltype)
             buf = serialize(value_or_buffer, celltype)
         self._content = buf
@@ -152,9 +159,13 @@ class Buffer:
         The checksum must have been computed already."""
         from .checksum.parse_buffer import parse_buffer_sync as parse_buffer
 
+        from .checksum.deep import DEEP_CELLTYPES, validate_deep_structure
+
+        deep = celltype in DEEP_CELLTYPES
         celltype = self._map_celltype(celltype)
         checksum = self.get_checksum()
-        return parse_buffer(self, checksum, celltype, copy=True)
+        value = parse_buffer(self, checksum, celltype, copy=True)
+        return validate_deep_structure(value) if deep else value
 
     def decode(self):
         return self.content.decode()

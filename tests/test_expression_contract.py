@@ -163,10 +163,6 @@ def test_expression_failures_are_not_cached_and_are_retried(monkeypatch):
     assert calls == 2
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: evaluation still takes non-scratch cache interest",
-)
 def test_expression_evaluation_does_not_publish_without_a_refholder(monkeypatch):
     from seamless.caching.buffer_cache import get_buffer_cache
 
@@ -210,10 +206,6 @@ def test_dummy_expression_preserves_its_checksum_without_fetching(monkeypatch):
     assert expression.compute(execution="local") == source_checksum
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: structural path rules are not checked at construction",
-)
 @pytest.mark.parametrize(
     "input_celltype,path",
     [
@@ -241,10 +233,6 @@ def test_statically_illegal_ordinary_paths_are_rejected_at_construction(
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: malformed path syntax is parsed only at evaluation",
-)
 def test_malformed_path_syntax_is_rejected_at_construction():
     with pytest.raises(ValueError, match="Unclosed|path"):
         Expression(
@@ -255,23 +243,15 @@ def test_malformed_path_syntax_is_rejected_at_construction():
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: pathless conversions are not checked at construction",
-)
 def test_illegal_pathless_conversion_is_rejected_at_construction():
     with pytest.raises(ValueError):
         Expression(
             Checksum(bytes.fromhex("55" * 32)),
-            input_celltype="text",
+            input_celltype="python",
             celltype="bool",
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: illegal deep conversions are not checked at construction",
-)
 @pytest.mark.parametrize(
     "source,target",
     [
@@ -292,10 +272,6 @@ def test_illegal_deep_conversions_are_rejected_at_construction(source, target):
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: adjacent ordinary paths are not fused yet",
-)
 def test_adjacent_paths_fuse_into_one_expression_identity():
     checksum = Checksum(bytes.fromhex("66" * 32))
     inner = Expression(
@@ -321,31 +297,24 @@ def test_adjacent_paths_fuse_into_one_expression_identity():
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "contract ahead of code: checksum-preserving conversion-plus-path fusion "
-        "is not implemented"
-    ),
-)
 def test_checksum_preserving_conversion_then_path_fuses():
     checksum = Checksum(bytes.fromhex("77" * 32))
     converted = Expression(
         checksum,
         path="",
-        input_celltype="text",
-        celltype="str",
+        input_celltype="python",
+        celltype="text",
     )
     projected = Expression(
         converted,
         path="[1]",
-        input_celltype="str",
-        celltype="str",
+        input_celltype="text",
+        celltype="text",
     )
 
     assert projected.input_checksum == checksum
     assert projected.path == "[1]"
-    assert projected.input_celltype == "str"
+    assert projected.input_celltype == "text"
     assert projected.identity_key[0] == ("checksum", checksum.hex())
 
 
@@ -367,10 +336,6 @@ def test_consecutive_conversions_remain_two_expression_identities():
     assert second.identity_key[0] == ("expression", first.identity_key)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep one-step Expressions are not implemented",
-)
 @pytest.mark.parametrize(
     "source_celltype,member_celltype,target",
     [
@@ -401,10 +366,6 @@ def test_deep_one_step_selects_a_child_without_fetching_it(
     assert expression.compute(execution="local") == expected
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep path shapes are not checked at construction",
-)
 @pytest.mark.parametrize("path", ["[0]", "[:1]", "['a']['b']"])
 def test_illegal_deep_path_shapes_are_rejected_at_construction(path):
     with pytest.raises(ValueError):
@@ -416,10 +377,6 @@ def test_illegal_deep_path_shapes_are_rejected_at_construction(path):
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep member target rules are not enforced",
-)
 @pytest.mark.parametrize(
     "source_celltype,illegal_target",
     [
@@ -443,10 +400,6 @@ def test_illegal_deep_member_targets_are_rejected_at_construction(
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep values still expose raw hex strings",
-)
 def test_deep_value_is_a_flat_index_of_checksum_objects():
     child_checksum = Checksum(bytes.fromhex("bb" * 32))
     value = Buffer({"member": child_checksum.hex()}, "deepcell").get_value("deepcell")
@@ -455,10 +408,6 @@ def test_deep_value_is_a_flat_index_of_checksum_objects():
     assert isinstance(value["member"], Checksum)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: the shared deep flatness validator does not exist",
-)
 def test_reading_a_nested_deep_value_rejects_the_false_deep_claim():
     nested = Buffer({"nested": {"member": "cc" * 32}}, "plain")
 
@@ -466,10 +415,6 @@ def test_reading_a_nested_deep_value_rejects_the_false_deep_claim():
         nested.get_value("deepcell")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep flatness failures are not Expression errors",
-)
 def test_deep_path_wraps_a_flatness_failure_as_expression_evaluation_error():
     nested = Buffer({"nested": {"member": "cc" * 32}}, "deepcell")
     expression = Expression(
@@ -483,10 +428,6 @@ def test_deep_path_wraps_a_flatness_failure_as_expression_evaluation_error():
         expression.compute(execution="local")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: folder-to-mixed fan-out is not implemented",
-)
 def test_folder_to_mixed_uses_one_dimensional_s1_arrays_for_every_child():
     empty = Buffer(b"")
     nul_bytes = Buffer(b"ab\x00\x00")
@@ -509,10 +450,6 @@ def test_folder_to_mixed_uses_one_dimensional_s1_arrays_for_every_child():
     assert value["nul"].tobytes() == b"ab\x00\x00"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: the Expression cancellation API is not renamed",
-)
 def test_expression_exposes_only_softcancel_and_retires_cancel():
     expression = Expression(
         Checksum(bytes.fromhex("cd" * 32)), input_celltype="plain"
@@ -524,10 +461,6 @@ def test_expression_exposes_only_softcancel_and_retires_cancel():
     assert not hasattr(expression_module, "cancel_expression")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: placement ignores configured read-buffer folders",
-)
 def test_auto_placement_treats_a_configured_read_folder_as_local(monkeypatch):
     from seamless.caching.buffer_cache import get_buffer_cache
     from seamless.checksum.cached_calculate_checksum import checksum_cache
