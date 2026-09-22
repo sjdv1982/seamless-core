@@ -104,15 +104,11 @@ def test_empty_bytes_canonicalization_is_celltype_specific():
 
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="public Expression identity keys do not yet canonicalize empty bytes",
-)
 def test_expression_key_canonicalizes_empty_bytes_input():
     empty_checksum = Buffer(b"").get_checksum()
     null_checksum = Checksum(NULL_CHECKSUM)
     expression = Expression(empty_checksum, input_celltype="bytes", celltype="bytes")
-    assert expression.identity_key[0] == null_checksum.hex()
+    assert expression.identity_key[0] == ("checksum", null_checksum.hex())
 
 
 @pytest.mark.parametrize("raw", [b"null", NULL_BUFFER])

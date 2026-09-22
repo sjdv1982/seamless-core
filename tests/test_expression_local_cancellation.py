@@ -15,10 +15,6 @@ def _softcancel(expression):
     return expression.cancel()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: local evaluations use the wrong active-member key",
-)
 def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monkeypatch):
     # Isolate caches without discarding state owned by other tests.
     monkeypatch.setattr(expression_mod, "_expression_cache", {})

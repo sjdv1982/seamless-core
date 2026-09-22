@@ -294,10 +294,6 @@ def test_remote_expression_members_share_one_active_request(monkeypatch):
     assert [call for call in calls if call != "database:set_hash_type"] == ["database:get", "jobserver:run", "database:get", "database:set"]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: last-waiter softcancel has no materialization linger",
-)
 def test_remote_expression_last_member_softcancel_lingers_active_request(monkeypatch):
     get_expression_cache().clear()
     _active_expressions.clear()
@@ -311,7 +307,8 @@ def test_remote_expression_last_member_softcancel_lingers_active_request(monkeyp
 
     from seamless_remote import jobserver_remote
 
-    async def run_expression(input_checksum, path, celltype, target_celltype):
+    async def run_expression(input_checksum, path, celltype, target_celltype, *, scratch):
+        assert scratch is True
         calls.append("jobserver:run")
         started.set()
         try:

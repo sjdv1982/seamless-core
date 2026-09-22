@@ -82,16 +82,24 @@ class Expression:
     _result_refheld: bool = field(
         init=False, default=False, compare=False, repr=False
     )
+    _input_refheld: Checksum | None = field(
+        init=False, default=None, compare=False, repr=False
+    )
     _refholds_released: bool = field(
         init=False, default=False, compare=False, repr=False
     )
 
     def __post_init__(self) -> None:
         from .cell_class import Cell, _typed_input_celltype, _check_input_ref
+
         ref = self._input_ref
         _check_input_ref(ref)
         typed = _typed_input_celltype(ref)
-        if typed is not None and self.input_celltype is not None and self.input_celltype != typed:
+        if (
+            typed is not None
+            and self.input_celltype is not None
+            and self.input_celltype != typed
+        ):
             raise ValueError("input_celltype disagrees with the typed source's celltype")
         if isinstance(ref, Cell):
             ref = ref.build()
@@ -99,9 +107,39 @@ class Expression:
         if self.input_celltype is None:
             object.__setattr__(self, "input_celltype", typed or self.celltype or "mixed")
         path = normalize_path(self.path)
-        celltype = (
-            self.input_celltype if self.celltype is None else self.celltype
-        )
+        celltype = self.input_celltype if self.celltype is None else self.celltype
+        from .checksum.expression import validate_expression_shape
+
+        validate_expression_shape(path, self.input_celltype, celltype)
+        if (
+            isinstance(ref, Expression)
+            and ref.validator is None
+            and ref.validator_language is None
+        ):
+            from .checksum.convert import _DEEP_CELLTYPES
+            from .checksum.conversion import conversion_trivial, conversion_reinterpret
+
+            if ref.input_celltype not in _DEEP_CELLTYPES:
+                if ref.input_celltype == ref.celltype and (ref.path or path):
+                    path = ref.path + (
+                        ("." + path)
+                        if ref.path and path and not path.startswith((".", "["))
+                        else path
+                    )
+                    object.__setattr__(self, "input_celltype", ref.input_celltype)
+                    ref = ref._input_ref
+                elif (
+                    path
+                    and not ref.path
+                    and (ref.input_celltype, ref.celltype)
+                    in conversion_trivial | conversion_reinterpret
+                ):
+                    ref = ref._input_ref
+        if isinstance(ref, Checksum):
+            from .checksum.null import canonicalize_checksum
+
+            ref = canonicalize_checksum(Checksum(ref), self.input_celltype)
+        object.__setattr__(self, "_input_ref", ref)
         validator = None if self.validator is None else Checksum(self.validator)
         object.__setattr__(self, "path", path)
         object.__setattr__(self, "celltype", celltype)
@@ -109,7 +147,8 @@ class Expression:
         from .reference_lifecycle import register_refholder
 
         if self.input_checksum is not None:
-            self.input_checksum.incref_refholder()
+            self.input_checksum.incref_refholder(scratch=True)
+            object.__setattr__(self, "_input_refheld", self.input_checksum)
         register_refholder(self)
 
     @property
@@ -157,7 +196,9 @@ class Expression:
         )
         return self._publish_result(result) if result is not None else None
 
-    def _evaluate_internal(self, *, execution: str = "auto") -> Checksum | None:
+    def _evaluate_internal(
+        self, *, execution: str = "auto", scratch: bool = True
+    ) -> Checksum | None:
         """Evaluate and publish without expressing user result interest.
 
         Dependency schedulers use this entry point.  Publication is still
@@ -186,7 +227,9 @@ class Expression:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                return asyncio.run(self._evaluate_internal_async(execution=execution))
+                return asyncio.run(
+                    self._evaluate_internal_async(execution=execution, scratch=scratch)
+                )
         from .checksum.expression import get_expression_cache
 
         cached = get_expression_cache().get(
@@ -220,11 +263,14 @@ class Expression:
         return self._publish_result(result)
 
     async def _evaluate_internal_async(
-        self, *, execution: str = "auto"
+        self, *, execution: str = "auto", scratch: bool = True
     ) -> Checksum | None:
         """Async counterpart of :meth:`_evaluate_internal`."""
 
-        from .checksum.expression import evaluate_expression_async, evaluate_expression_remote
+        from .checksum.expression import (
+            evaluate_expression_async,
+            evaluate_expression_remote,
+        )
 
         input_ref = self._input_ref
         if isinstance(input_ref, Expression):
@@ -247,6 +293,7 @@ class Expression:
                 self.celltype,
                 validator=self.validator,
                 validator_language=self.validator_language,
+                member_id=id(self),
             )
         else:
             result = await evaluate_expression_remote(
@@ -257,6 +304,7 @@ class Expression:
                 validator=self.validator,
                 validator_language=self.validator_language,
                 execution=execution,
+                scratch=scratch,
                 member_id=id(self),
             )
         return self._publish_result(result)
@@ -267,7 +315,7 @@ class Expression:
         if not self._refhold_result:
             object.__setattr__(self, "_refhold_result", True)
         if self._result_checksum is not None and not self._result_refheld:
-            self._result_checksum.incref_refholder()
+            self._result_checksum.incref_refholder(scratch=True)
             object.__setattr__(self, "_result_refheld", True)
 
     def _publish_result(self, result: Checksum | str | bytes | None) -> Checksum | None:
@@ -276,18 +324,18 @@ class Expression:
         if result is None:
             return None
         checksum = Checksum(result)
-        checksum.tempref()
+        checksum.tempref(scratch=True)
         old = self._result_checksum
         if old is not None and old == checksum:
             if self._refhold_result and not self._result_refheld:
-                checksum.incref_refholder()
+                checksum.incref_refholder(scratch=True)
                 object.__setattr__(self, "_result_refheld", True)
             return checksum
 
         old_refheld = self._result_refheld
         new_refheld = self._refhold_result and not self._refholds_released
         if new_refheld:
-            checksum.incref_refholder()
+            checksum.incref_refholder(scratch=True)
         object.__setattr__(self, "_result_checksum", checksum)
         object.__setattr__(self, "_result_refheld", new_refheld)
         if old is not None and old_refheld:
@@ -298,8 +346,8 @@ class Expression:
         if self._refholds_released:
             return ()
         claims = []
-        if self.input_checksum is not None:
-            claims.append((self.input_checksum, "input"))
+        if self._input_refheld is not None:
+            claims.append((self._input_refheld, "input"))
         if self._refhold_result and self._result_checksum is not None:
             claims.append((self._result_checksum, "result"))
         return tuple(claims)
@@ -308,8 +356,9 @@ class Expression:
         if self._refholds_released:
             return
         object.__setattr__(self, "_refholds_released", True)
-        if self.input_checksum is not None:
-            self.input_checksum.decref_refholder()
+        if self._input_refheld is not None:
+            self._input_refheld.decref_refholder()
+            object.__setattr__(self, "_input_refheld", None)
         if self._result_refheld and self._result_checksum is not None:
             self._result_checksum.decref_refholder()
             object.__setattr__(self, "_result_refheld", False)
@@ -408,31 +457,31 @@ class Expression:
         self._enable_result_holding()
         return self._evaluate_internal(execution=execution)
 
-    def run(self) -> Any:
+    def run(self, *, execution: str = "auto") -> Any:
         from .checksum.expression import resolve_expression_value
 
-        result = self.compute()
+        self._enable_result_holding()
+        result = self._evaluate_internal(execution=execution, scratch=False)
         if result is None:
             return None
         return resolve_expression_value(result, self.celltype)
 
     __call__ = run
 
-    def cancel(self) -> bool:
-        """Soft-cancel this expression's active remote evaluation, if any."""
-
+    def softcancel(self) -> bool:
+        """Leave this Expression's waiting set without interrupting shared work."""
         input_checksum = self.input_checksum
         if input_checksum is None:
             return False
-        from .checksum.expression import cancel_expression
+        from .checksum.expression import softcancel_expression
 
-        return cancel_expression(
-            input_checksum,
-            self.path,
-            self.input_celltype,
-            self.celltype,
-            member_id=id(self),
+        return softcancel_expression(
+            (input_checksum.hex(), self.path, self.input_celltype, self.celltype),
+            id(self),
         )
+
+    def cancel(self):
+        raise RuntimeError("Expressions have no hard cancel; use softcancel()")
 
 __all__ = [
     "Expression",

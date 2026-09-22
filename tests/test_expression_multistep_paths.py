@@ -49,10 +49,6 @@ def test_valid_multistep_path_evaluates(value, celltype, path, target_celltype, 
     assert _expression(value, celltype, path, target_celltype).run() == expected
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: ordinary path shapes are not vetted at construction",
-)
 def test_bytes_item_cannot_have_a_following_step():
     with pytest.raises(ValueError, match=r"\[0\]"):
         _expression(b"ab", "bytes", "[0][0]")
