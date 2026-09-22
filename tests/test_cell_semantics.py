@@ -69,7 +69,7 @@ def test_buffer_writes_deposit_the_buffer(form):
     assert cell.value == f'deposited standalone {form}'
 
 
-@pytest.mark.parametrize('make', [lambda: Cell('int'), lambda: Cell('plain')['x']], ids=['cell', 'subcell'])
+@pytest.mark.parametrize('make', [lambda: Cell('int'), lambda: Cell('plain')['x']], ids=['cell', 'projection'])
 def test_set_and_value_take_values_only(make):
     source = Cell('int'); source.set(1)
     references = [
@@ -79,9 +79,10 @@ def test_set_and_value_take_values_only(make):
     ]
     for reference, message in references:
         cell = make()
+        original_source, original_state = cell.source, cell.state
         with pytest.raises(TypeError, match=message): cell.set(reference)
         with pytest.raises(TypeError, match=message): cell.value = reference
-        assert cell.source is None and cell.state == 'unwired'
+        assert cell.source is original_source and cell.state == original_state
 
 
 @pytest.mark.parametrize('celltype', celltypes + ['deepcell', 'deepfolder', 'folder', 'module'])
@@ -92,8 +93,8 @@ def test_null_is_celltype_independent(celltype):
     assert Buffer(None, celltype).get_checksum() == checksum
     assert cell.value == (b'' if celltype == 'bytes' else None)
     validate_deserializable_as(checksum, Buffer._map_celltype(celltype))
-    cell.celltype = 'int'
-    assert cell.checksum == checksum and cell.value is None
+    # Cross-celltype retyping is paired with the bound case in
+    # test_cells_contract_alignment.py::test_null_retype_keeps_checksum.
     assert checksum.resolve(celltype) == (b'' if celltype == 'bytes' else None)
 
 

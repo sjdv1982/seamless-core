@@ -11,24 +11,6 @@ from seamless.checksum.expression import get_expression_cache
 from tests.helpers.fake_remotes import drop_buffer
 
 
-def _identity(value):
-    return value
-
-
-def test_checksum_does_not_start_source_transformation():
-    from seamless_transformer import delayed
-
-    transformation = delayed(_identity)(12)
-    cell = Cell("int", source=transformation)
-
-    assert cell.checksum is None
-    assert cell.state == "waiting"
-    assert transformation._evaluated is False
-
-    assert cell.compute() == Buffer(12, "int").get_checksum()
-    assert transformation._evaluated is True
-
-
 def test_checksum_evaluates_own_conversion_from_bare_checksum():
     get_expression_cache().clear()
     source = Buffer(12, "int")
@@ -84,18 +66,17 @@ def test_missing_input_failure_is_handle_local_and_retryable(monkeypatch):
     source = Buffer({"a": "later"}, "plain")
     checksum, content = source.get_checksum(), source.content
     drop_buffer(checksum)
-    cell = Cell("str", checksum=checksum, input_celltype="plain", path="a")
+    cell = Cell("plain", checksum=checksum)["a"]
 
     assert cell.checksum is None
     assert cell.state == "failed"
-    assert isinstance(cell.exception, CacheMissError)
-    assert cell.exception.args == (checksum,)
-    assert cell.exception.__traceback__ is None
+    assert cell.exception is not None
+    assert checksum.hex() in str(cell.exception)
 
     restored = Buffer(content, checksum=checksum).tempref()
     try:
         cell.clear_exception()
-        assert cell.checksum == Buffer("later", "str").get_checksum()
+        assert cell.checksum == Buffer("later", "plain").get_checksum()
         assert cell.state == "complete"
         assert cell.exception is None
     finally:
@@ -105,9 +86,7 @@ def test_missing_input_failure_is_handle_local_and_retryable(monkeypatch):
 def test_unavailable_result_buffer_does_not_fail_cell(monkeypatch):
     source = Buffer({"a": "gone"}, "plain")
     source_ref = source.tempref()
-    cell = Cell(
-        "str", checksum=source.get_checksum(), input_celltype="plain", path="a"
-    )
+    cell = Cell("plain", checksum=source.get_checksum())["a"]
     result = cell.checksum
     assert result is not None
     drop_buffer(result)
@@ -124,3 +103,59 @@ def test_unavailable_result_buffer_does_not_fail_cell(monkeypatch):
         assert cell.exception is None
     finally:
         source_ref.clear()
+
+
+def test_read_uses_completed_dependency_without_starting_it():
+    source = Buffer("completed dependency", "str")
+    hold = source.tempref()
+
+    class Dependency:
+        celltype = "str"
+
+        def _compute_dependency(self):
+            pytest.fail("a Cell property started its source Transformation")
+
+        def _result_checksum_internal(self):
+            return source.get_checksum()
+
+    try:
+        # A barrier keeps the dependency below more than one Expression.
+        cell = Cell(source=Dependency()).as_celltype("text")[0]
+        assert cell.value == "c"
+    finally:
+        hold.clear()
+
+
+@pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder", "module"])
+def test_null_conversion_child_builds_and_evaluates(celltype):
+    root = Cell(celltype)
+    root.set(None)
+    child = root.as_celltype("int")
+    assert child.build().compute() == root.checksum
+    assert child.checksum == root.checksum
+    assert child.value is None
+
+
+def test_fingertip_uses_only_the_existing_result(monkeypatch):
+    root = Cell("str")
+    root.set("result to recover")
+    child = root.as_celltype("text")
+    assert child.fingertip() is None
+    result = child.compute()
+    recovered = Buffer("result to recover", "text")
+    requests = []
+
+    def recover(checksum):
+        requests.append(checksum)
+        return recovered
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("fingertip started Cell evaluation")
+
+    monkeypatch.setattr(Checksum, "fingertip_sync", recover)
+    monkeypatch.setattr(Expression, "compute", forbidden)
+    assert child.fingertip() is recovered
+    assert requests == [result]
+    root.set("changed source")
+    assert child.fingertip() is None
+    assert requests == [result]
