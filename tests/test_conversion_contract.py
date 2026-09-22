@@ -365,10 +365,6 @@ def test_uncovered_reformat_keep_branches_preserve_the_checksum(
     assert result == (buffer.get_checksum(), None)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: deep zero-path conversions are not implemented",
-)
 @pytest.mark.parametrize(
     "source,target",
     [
@@ -392,10 +388,6 @@ def test_deep_free_zero_path_conversions_preserve_checksum_without_fetch(
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: folder-to-mixed materialization is not implemented",
-)
 def test_empty_folder_to_mixed_materializes_the_empty_mapping():
     source = Buffer({}, "folder")
     result_checksum, result_buffer = convert_checksum(

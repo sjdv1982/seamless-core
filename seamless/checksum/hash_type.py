@@ -163,6 +163,21 @@ MIC_BY_KIND = {
 }
 
 FLAT_SEQ_CELLTYPES = {"text", "str", "python", "ipython", "yaml"}
+HASH_TYPE_CELLTYPES = {
+    "binary",
+    "mixed",
+    "text",
+    "python",
+    "ipython",
+    "plain",
+    "yaml",
+    "str",
+    "bytes",
+    "int",
+    "float",
+    "bool",
+    "checksum",
+}
 CHECKSUM_TRUE = Checksum(hashlib.sha256(b"true").digest())
 CHECKSUM_FALSE = Checksum(hashlib.sha256(b"false").digest())
 CHECKSUM_NULL = Checksum(hashlib.sha256(b"null").digest())
@@ -418,6 +433,8 @@ def deserializable_as(
 ) -> bool | None:
     """Return True (known), False (disproved), or None (requires parsing)."""
 
+    if celltype not in HASH_TYPE_CELLTYPES:
+        raise ValueError(f"celltype is outside the HashType domain: {celltype!r}")
     ti = _coerce(hash_type)
     kind = ti.kind
     checksum_obj = Checksum(checksum)
@@ -467,6 +484,10 @@ def deserializable_as(
 def capabilities(hash_type: HashType | int, source_celltype: str) -> set[str]:
     """Return expression capabilities relative to a source celltype."""
 
+    if source_celltype not in HASH_TYPE_CELLTYPES:
+        raise ValueError(
+            f"celltype is outside the HashType domain: {source_celltype!r}"
+        )
     ti = _coerce(hash_type)
     if source_celltype == "bytes":
         return {"SEQ"}
@@ -488,6 +509,10 @@ def capabilities(hash_type: HashType | int, source_celltype: str) -> set[str]:
 
 
 def has_numeric_items(hash_type: HashType | int, source_celltype: str) -> bool | None:
+    if source_celltype not in HASH_TYPE_CELLTYPES:
+        raise ValueError(
+            f"celltype is outside the HashType domain: {source_celltype!r}"
+        )
     ti = _coerce(hash_type)
     if source_celltype == "bytes":
         return True
@@ -502,6 +527,10 @@ def has_numeric_items(hash_type: HashType | int, source_celltype: str) -> bool |
 
 
 def has_string_items(hash_type: HashType | int, source_celltype: str) -> bool | None:
+    if source_celltype not in HASH_TYPE_CELLTYPES:
+        raise ValueError(
+            f"celltype is outside the HashType domain: {source_celltype!r}"
+        )
     ti = _coerce(hash_type)
     if source_celltype in FLAT_SEQ_CELLTYPES:
         return True

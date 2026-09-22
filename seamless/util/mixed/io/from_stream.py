@@ -79,7 +79,15 @@ def _from_stream_sub(parent_data, sub, storage, form, jsons, buffer):
         if is_array or not isinstance(parent_data, np.generic):
             assert "type" in form
             type_ = form["type"]
-            assert type_ in ("array", "tuple", "object")
+            assert type_ in (
+                "array",
+                "tuple",
+                "object",
+                "number",
+                "integer",
+                "boolean",
+                "string",
+            )
             if type_ == "array":
                 shape = form["shape"]
                 my_form = form["items"]

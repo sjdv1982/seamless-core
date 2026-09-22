@@ -237,10 +237,6 @@ def _string_items_query(word: HashType, celltype: str) -> object:
     return has_string_items(word, celltype)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: HashType queries must reject names outside the 13",
-)
 @pytest.mark.parametrize(
     "query",
     (
@@ -260,10 +256,6 @@ def test_non_hash_type_celltypes_are_caller_errors(
         query(word, celltype)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: conversion feasibility rejects names outside the 13",
-)
 @pytest.mark.parametrize("celltype", OUTSIDE_HASHTYPE_DOMAIN)
 @pytest.mark.parametrize("position", ("source", "target"))
 def test_conversion_feasibility_rejects_non_hash_type_celltypes(celltype, position):

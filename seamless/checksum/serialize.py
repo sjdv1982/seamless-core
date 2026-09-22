@@ -4,7 +4,7 @@ import logging
 
 from ..util import lrucache2
 from ..util import unchecksum
-from .celltypes import text_types
+from .celltypes import celltypes, text_types
 
 # serialize_cache: maps id(value),celltype to (buffer, value).
 # Need to store (a ref to) value,
@@ -14,10 +14,36 @@ serialize_cache = lrucache2(10)
 logger = logging.getLogger(__name__)
 
 
+def _normalize_mixed_special_values(value):
+    """Move values without a JSON representation into NumPy storage."""
+    import math
+    import numpy as np
+
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, (float, np.floating)) and not math.isfinite(value):
+        return np.float64(value)
+    if isinstance(value, list):
+        return [_normalize_mixed_special_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_mixed_special_values(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _normalize_mixed_special_values(item) for key, item in value.items()
+        }
+    return value
+
+
 def _serialize(value, celltype: str):
     from seamless import Checksum
     from .json_ import json_dumps_bytes
 
+    if celltype not in celltypes:
+        if value is None and celltype in {"deepcell", "deepfolder", "folder", "module"}:
+            from .null import NULL_BUFFER
+
+            return NULL_BUFFER
+        raise TypeError(celltype)
     if value is None:
         from .null import NULL_BUFFER
         return NULL_BUFFER
@@ -37,11 +63,33 @@ def _serialize(value, celltype: str):
                 value = float(value)
             elif celltype == "bool":
                 value = bool(value)
+            if celltype == "float":
+                import math
+
+                if not math.isfinite(value):
+                    raise ValueError("cannot serialize a non-finite float")
             buffer = json_dumps_bytes(value) + b"\n"
         else:
             buffer = (str(value).rstrip("\n") + "\n").encode()
     elif celltype == "plain":
+        import math
+        import numpy as np
+
+        def check_finite(item):
+            if isinstance(item, (float, np.floating)) and not math.isfinite(item):
+                raise ValueError("cannot serialize a non-finite float as plain")
+            if isinstance(item, dict):
+                for child in item.values():
+                    check_finite(child)
+            elif isinstance(item, (list, tuple)):
+                for child in item:
+                    check_finite(child)
+            elif isinstance(item, np.ndarray) and item.dtype.kind in "fc":
+                if not np.isfinite(item).all():
+                    raise ValueError("cannot serialize a non-finite array as plain")
+
         value = unchecksum(value)
+        check_finite(value)
         buffer = json_dumps_bytes(value) + b"\n"
     elif celltype == "bytes":
         buffer = None
@@ -64,9 +112,21 @@ def _serialize(value, celltype: str):
     else:
         if celltype == "mixed":
             from ..util.mixed.io import serialize as mixed_serialize
+            import math
+            import numpy as np
 
             value = unchecksum(value)
-            buffer = mixed_serialize(value)
+            value = _normalize_mixed_special_values(value)
+            if isinstance(value, (complex, np.complexfloating)):
+                value = np.asarray(value)
+                buffer = mixed_serialize(value, storage="pure-binary", form={})
+            elif isinstance(value, np.floating) and not math.isfinite(value):
+                # JSON has no representation for these values. Store them as a
+                # zero-dimensional float64 array, consistently with NumPy data.
+                value = np.float64(value)
+                buffer = mixed_serialize(value)
+            else:
+                buffer = mixed_serialize(value)
         elif celltype == "binary":
             if isinstance(value, bytes):
                 buffer = value
@@ -75,7 +135,7 @@ def _serialize(value, celltype: str):
                 from ..util.mixed.io import serialize as mixed_serialize
 
                 value = np.array(value)
-                buffer = mixed_serialize(value)
+                buffer = mixed_serialize(value, storage="pure-binary", form={})
         else:
             raise TypeError(celltype)
     if celltype == "bytes" and buffer == b"":

@@ -19,6 +19,7 @@ from .conversion import (
 )
 from .hash_type import (
     DType,
+    HASH_TYPE_CELLTYPES,
     HashType,
     Rank,
     get_hash_type,
@@ -26,6 +27,8 @@ from .hash_type import (
     register_hash_type_for_buffer,
     register_hash_type_for_buffer_async,
 )
+
+_STRUCTURAL_CELLTYPES = {"deepcell", "deepfolder", "folder", "module"}
 
 
 class HashTypeValidationError(ValueError):
@@ -143,6 +146,16 @@ def validate_expression(
     """Validate expression source, path capability, and empty-path conversion."""
 
     checksum = Checksum(checksum)
+    if (
+        source_celltype not in HASH_TYPE_CELLTYPES
+        or target_celltype not in HASH_TYPE_CELLTYPES
+    ):
+        for celltype in (source_celltype, target_celltype):
+            if celltype not in HASH_TYPE_CELLTYPES | _STRUCTURAL_CELLTYPES:
+                raise ValueError(f"unknown celltype: {celltype!r}")
+        # Structural celltypes are validated by their own conversion/path
+        # tables, never by HashType's deliberately narrower 13-type domain.
+        return ensure_hash_type(checksum, buffer=buffer)
     hash_type = validate_deserializable_as(
         checksum, source_celltype, buffer=buffer
     )
@@ -181,6 +194,14 @@ async def validate_expression_async(
     """Async expression validation that can consult remote HashType databases."""
 
     checksum = Checksum(checksum)
+    if (
+        source_celltype not in HASH_TYPE_CELLTYPES
+        or target_celltype not in HASH_TYPE_CELLTYPES
+    ):
+        for celltype in (source_celltype, target_celltype):
+            if celltype not in HASH_TYPE_CELLTYPES | _STRUCTURAL_CELLTYPES:
+                raise ValueError(f"unknown celltype: {celltype!r}")
+        return await ensure_hash_type_async(checksum, buffer=buffer)
     hash_type = await validate_deserializable_as_async(
         checksum, source_celltype, buffer=buffer
     )
@@ -218,6 +239,10 @@ def conversion_feasible(
     """Return False only when HashType proves conversion impossible."""
 
     from .null import is_null_value
+
+    for celltype in (source_celltype, target_celltype):
+        if celltype not in HASH_TYPE_CELLTYPES:
+            raise ValueError(f"celltype is outside the HashType domain: {celltype!r}")
     if is_null_value(checksum):
         return True
     hash_type = hash_type if isinstance(hash_type, HashType) else HashType.unpack(hash_type)

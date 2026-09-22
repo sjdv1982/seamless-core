@@ -301,7 +301,11 @@ def get_form_list_plain(data):
 def get_form(data):
     if isinstance(data, bytes):
         data = np.array(data)
-    if isinstance(data, Scalar):  # type: ignore
+    if isinstance(data, np.floating) and not np.isfinite(data):
+        # Non-finite values cannot be represented by JSON. Keeping the NumPy
+        # scalar in binary storage also preserves NaN/inf when it is nested.
+        storage, typedef = "pure-binary", get_tform_numpy(data.dtype)
+    elif isinstance(data, Scalar):  # type: ignore
         storage, typedef = "pure-plain", get_typedef_scalar(data)
     elif isinstance(data, void):
         dt = data.dtype
