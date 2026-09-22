@@ -118,6 +118,8 @@ def test_null_vs_clear_and_failed_conversion():
     cell.value = 4; cell.checksum = None
     assert cell.state == 'unwired'
     cell.celltype = 'str'; cell.set('hello'); cell.celltype = 'int'
+    assert cell.state == 'waiting'
+    assert cell.checksum is None
     assert cell.state == 'failed' and cell.exception is not None and cell.checksum is None
 
 
