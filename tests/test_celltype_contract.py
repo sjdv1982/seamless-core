@@ -79,10 +79,6 @@ def test_parser_and_serializer_reject_unknown_celltypes():
         _serialize(1, "not-a-celltype")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="_serialize returns canonical null before validating the celltype",
-)
 def test_serializer_rejects_unknown_celltype_for_none_too():
     with pytest.raises(TypeError):
         _serialize(None, "not-a-celltype")
@@ -250,20 +246,12 @@ def test_canonical_scalar_and_text_serialization(value, celltype, expected):
 
 @pytest.mark.parametrize("celltype", ["plain", "float"])
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
-@pytest.mark.xfail(
-    strict=False,
-    reason="JSON serialization currently turns non-finite numbers into null",
-)
 def test_json_celltypes_reject_nonfinite_values(celltype, value):
     with pytest.raises((TypeError, ValueError)):
         _serialize(value, celltype)
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
-@pytest.mark.xfail(
-    strict=False,
-    reason="mixed currently serializes non-finite Python floats as raw text",
-)
 def test_mixed_preserves_nonfinite_values_as_numpy(value):
     top_level = Buffer(value, "mixed").get_value("mixed")
     nested = Buffer([value], "mixed").get_value("mixed")[0]
@@ -293,20 +281,12 @@ def test_numpy_scalar_and_array_storage_contract():
         np.testing.assert_array_equal(restored, array)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="mixed does not yet accept NumPy boolean scalars",
-)
 def test_mixed_numpy_boolean_scalar_becomes_python_bool():
     restored = Buffer(np.bool_(True), "mixed").get_value("mixed")
     assert type(restored) is bool
 
 
 @pytest.mark.parametrize("celltype", ["binary", "mixed"])
-@pytest.mark.xfail(
-    strict=False,
-    reason="the mixed serializer does not yet support complex dtypes",
-)
 def test_complex_values_use_numpy_storage(celltype):
     scalar = np.complex64(1 + 2j)
     restored = Buffer(scalar, celltype).get_value(celltype)

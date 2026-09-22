@@ -34,6 +34,15 @@ from .conversion import (
     conversion_values,
 )
 
+_DEEP_CELLTYPES = {"deepcell", "deepfolder", "folder"}
+_DEEP_FREE_CONVERSIONS = {
+    ("deepcell", "plain"),
+    ("deepfolder", "plain"),
+    ("folder", "deepfolder"),
+    ("deepfolder", "folder"),
+    ("deepcell", "deepfolder"),
+}
+
 
 class _NeedsBuffer(Exception):
     """Private dry-run signal raised when a conversion needs source content."""
@@ -70,14 +79,38 @@ def convert_checksum(
     """
 
     checksum = Checksum(checksum)
-    if source not in celltypes:
+    known_celltypes = set(celltypes) | _DEEP_CELLTYPES
+    if source not in known_celltypes:
         raise TypeError(source)
-    if target not in celltypes:
+    if target not in known_celltypes:
         raise TypeError(target)
     if not callable(get_buffer):
         raise TypeError("get_buffer must be callable")
 
     try:
+        from .null import is_null_value
+
+        if is_null_value(checksum) and (
+            source in _DEEP_CELLTYPES or target in _DEEP_CELLTYPES
+        ):
+            return checksum, None
+        if source == target and source in _DEEP_CELLTYPES:
+            return checksum, None
+        if (source, target) in _DEEP_FREE_CONVERSIONS:
+            return checksum, None
+        if (source, target) == ("folder", "mixed"):
+            index = get_buffer()
+            index_buffer = _coerce_buffer(index)
+            index_value = index_buffer.get_value("plain")
+            if index_value:
+                raise SeamlessConversionError(
+                    "folder to mixed materialization requires member buffers"
+                )
+            return _buffer_result(Buffer({}, "mixed"))
+        if source in _DEEP_CELLTYPES or target in _DEEP_CELLTYPES:
+            raise SeamlessConversionError(
+                f"{checksum.hex()} cannot be converted from {source} to {target}"
+            )
         return _convert(checksum, source, target, _LazyBuffer(get_buffer))
     except (_NeedsBuffer, SeamlessConversionError, CacheMissError):
         # A missing buffer is not a failed conversion: it keeps its type.
