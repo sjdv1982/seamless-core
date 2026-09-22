@@ -123,7 +123,8 @@ def test_positional_argument_is_celltype(celltype):
 
 
 def test_positional_celltype_with_keyword_reference():
-    checksum = Buffer(42, "int").get_checksum()
+    buffer = Buffer(42, "int")
+    checksum = buffer.get_checksum()
     cell = Cell("int", checksum=checksum)
     assert cell.run() == 42
     assert cell.checksum == checksum

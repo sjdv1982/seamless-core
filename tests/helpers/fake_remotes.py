@@ -42,6 +42,7 @@ def install_fake_remotes(
     database_remote = ModuleType("seamless_remote.database_remote")
     jobserver_remote = ModuleType("seamless_remote.jobserver_remote")
     buffer_remote = ModuleType("seamless_remote.buffer_remote")
+    buffer_remote._read_folders_clients = []
 
     def key(input_checksum, path, celltype, target_celltype):
         return (
@@ -73,7 +74,7 @@ def install_fake_remotes(
         hash_type_rows[Checksum(checksum).hex()] = int(hash_type)
         return True
 
-    async def run_expression(input_checksum, path, celltype, target_celltype):
+    async def run_expression(input_checksum, path, celltype, target_celltype, *, scratch=False):
         if not jobserver_available:
             raise RuntimeError("No jobserver clients are available")
         calls.append("jobserver:run")

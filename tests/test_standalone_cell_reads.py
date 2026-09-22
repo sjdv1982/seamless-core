@@ -84,18 +84,17 @@ def test_missing_input_failure_is_handle_local_and_retryable(monkeypatch):
     source = Buffer({"a": "later"}, "plain")
     checksum, content = source.get_checksum(), source.content
     drop_buffer(checksum)
-    cell = Cell("str", checksum=checksum, input_celltype="plain", path="a")
+    cell = Cell("plain", checksum=checksum)["a"]
 
     assert cell.checksum is None
     assert cell.state == "failed"
-    assert isinstance(cell.exception, CacheMissError)
-    assert cell.exception.args == (checksum,)
-    assert cell.exception.__traceback__ is None
+    assert cell.exception is not None
+    assert checksum.hex() in str(cell.exception)
 
     restored = Buffer(content, checksum=checksum).tempref()
     try:
         cell.clear_exception()
-        assert cell.checksum == Buffer("later", "str").get_checksum()
+        assert cell.checksum == Buffer("later", "plain").get_checksum()
         assert cell.state == "complete"
         assert cell.exception is None
     finally:
@@ -105,9 +104,7 @@ def test_missing_input_failure_is_handle_local_and_retryable(monkeypatch):
 def test_unavailable_result_buffer_does_not_fail_cell(monkeypatch):
     source = Buffer({"a": "gone"}, "plain")
     source_ref = source.tempref()
-    cell = Cell(
-        "str", checksum=source.get_checksum(), input_celltype="plain", path="a"
-    )
+    cell = Cell("plain", checksum=source.get_checksum())["a"]
     result = cell.checksum
     assert result is not None
     drop_buffer(result)

@@ -92,8 +92,8 @@ def test_null_is_celltype_independent(celltype):
     assert Buffer(None, celltype).get_checksum() == checksum
     assert cell.value == (b'' if celltype == 'bytes' else None)
     validate_deserializable_as(checksum, Buffer._map_celltype(celltype))
-    cell.celltype = 'int'
-    assert cell.checksum == checksum and cell.value is None
+    # Cross-celltype retyping is paired with the bound case in
+    # test_cells_contract_alignment.py::test_null_retype_keeps_checksum.
     assert checksum.resolve(celltype) == (b'' if celltype == 'bytes' else None)
 
 
