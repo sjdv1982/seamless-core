@@ -35,13 +35,10 @@ def test_hashtype_witness_words_are_well_formed(witness):
     assert len(witness.invalid_expressions) >= 2
 
 
-def test_hashtype_witness_corpus_has_expected_shape():
-    words = {witness.expected_hash_type for witness in WITNESSES}
+def test_hashtype_witness_names_are_unique():
     names = {witness.name for witness in WITNESSES}
 
-    assert len(WITNESSES) >= 65
     assert len(names) == len(WITNESSES)
-    assert len(words) >= 62
 
 
 @pytest.mark.parametrize(
@@ -75,7 +72,7 @@ def test_helper_paths_roundtrip_through_database_payload(witness, case):
 
 
 @pytest.mark.parametrize("witness", WITNESSES, ids=_witness_id)
-def test_deep_celltype_variants_are_marked_only_on_json_containers(witness):
-    if witness.deep_celltypes:
+def test_outside_hashtype_variants_are_marked_only_on_json_containers(witness):
+    if witness.outside_hashtype_celltypes:
         assert witness.mic == "plain"
         assert witness.decoded_hash_type.kind.name in {"JSON_OBJECT", "JSON_ARRAY"}

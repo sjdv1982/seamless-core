@@ -46,7 +46,7 @@ class HashTypeWitness:
     expected_hash_type: int
     mic: str
     expressions: tuple[ExpressionCase, ...]
-    deep_celltypes: tuple[str, ...] = ()
+    outside_hashtype_celltypes: tuple[str, ...] = ()
 
     @property
     def decoded_hash_type(self) -> HashType:
@@ -179,9 +179,14 @@ def _build_witnesses() -> list[HashTypeWitness]:
             case_expressions = expressions
             if kind == Kind.JSON_NUMBER and length == Length.LONG:
                 case_expressions = _long_json_number_expressions()
-            deep_celltypes = ()
+            outside_hashtype_celltypes = ()
             if kind in (Kind.JSON_OBJECT, Kind.JSON_ARRAY):
-                deep_celltypes = ("deepcell", "deepfolder", "folder", "module")
+                outside_hashtype_celltypes = (
+                    "deepcell",
+                    "deepfolder",
+                    "folder",
+                    "module",
+                )
             witnesses.append(
                 _witness(
                     f"{base}_{length.name.lower()}",
@@ -192,7 +197,7 @@ def _build_witnesses() -> list[HashTypeWitness]:
                     value=None,
                     mic=mic,
                     expressions=case_expressions,
-                    deep_celltypes=deep_celltypes,
+                    outside_hashtype_celltypes=outside_hashtype_celltypes,
                 )
             )
 
@@ -228,7 +233,7 @@ def _witness(
     value: Any = None,
     mic: str | None = None,
     expressions: tuple[ExpressionCase, ...],
-    deep_celltypes: tuple[str, ...] = (),
+    outside_hashtype_celltypes: tuple[str, ...] = (),
 ) -> HashTypeWitness:
     checksum = Buffer(raw).get_checksum()
     if mic is None:
@@ -241,7 +246,7 @@ def _witness(
         expected_hash_type=pack(kind, length, dtype, rank, flags),
         mic=mic,
         expressions=expressions,
-        deep_celltypes=deep_celltypes,
+        outside_hashtype_celltypes=outside_hashtype_celltypes,
     )
 
 

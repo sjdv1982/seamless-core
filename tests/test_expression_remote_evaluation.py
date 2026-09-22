@@ -294,7 +294,11 @@ def test_remote_expression_members_share_one_active_request(monkeypatch):
     assert [call for call in calls if call != "database:set_hash_type"] == ["database:get", "jobserver:run", "database:get", "database:set"]
 
 
-def test_remote_expression_last_member_cancel_stops_active_request(monkeypatch):
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: last-waiter softcancel has no materialization linger",
+)
+def test_remote_expression_last_member_softcancel_lingers_active_request(monkeypatch):
     get_expression_cache().clear()
     _active_expressions.clear()
     source_checksum = Checksum("4" * 64)
@@ -302,6 +306,7 @@ def test_remote_expression_last_member_cancel_stops_active_request(monkeypatch):
     expression_rows = {}
     calls = []
     started = asyncio.Event()
+    request_cancelled = asyncio.Event()
     _install_fake_remotes(monkeypatch, expression_rows, {key: "5" * 64}, calls)
 
     from seamless_remote import jobserver_remote
@@ -309,7 +314,11 @@ def test_remote_expression_last_member_cancel_stops_active_request(monkeypatch):
     async def run_expression(input_checksum, path, celltype, target_celltype):
         calls.append("jobserver:run")
         started.set()
-        await asyncio.Future()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            request_cancelled.set()
+            raise
 
     jobserver_remote.run_expression = run_expression
     expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
@@ -317,11 +326,18 @@ def test_remote_expression_last_member_cancel_stops_active_request(monkeypatch):
     async def main():
         task = asyncio.create_task(expression.compute_async(execution="remote"))
         await started.wait()
-        assert expression.cancel() is True
+        softcancel = getattr(type(expression), "softcancel", None)
+        if softcancel is None:
+            assert expression.cancel() is True
+        else:
+            assert softcancel(expression) is True
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    import pytest
+        # Leaving the waiting set abandons this caller immediately, but the
+        # materialization site owns the fetch through its linger.
+        await asyncio.sleep(0.05)
+        assert not request_cancelled.is_set()
 
     asyncio.run(main())
     assert [call for call in calls if call != "database:set_hash_type"] == ["database:get", "jobserver:run"]
