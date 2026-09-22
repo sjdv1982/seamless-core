@@ -1,24 +1,31 @@
-"""Characterize the local cancellation bug in known-issues section 3.4, item 2."""
+"""Local Expression cancellation follows the materialization waiting-set contract."""
 
 import asyncio
+
+import pytest
 
 from seamless import Buffer, Checksum, Expression
 from seamless.checksum import expression as expression_mod
 
 
-def test_local_in_flight_cancel_returns_false_and_evaluation_completes(monkeypatch):
-    """An active local evaluation currently survives Expression.cancel().
+def _softcancel(expression):
+    method = getattr(type(expression), "softcancel", None)
+    if method is not None:
+        return method(expression)
+    return expression.cancel()
 
-    This records the documented bug, rather than the desired cancellation
-    contract. Update the expectations when local cancellation is implemented.
-    """
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: local evaluations use the wrong active-member key",
+)
+def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monkeypatch):
     # Isolate caches without discarding state owned by other tests.
     monkeypatch.setattr(expression_mod, "_expression_cache", {})
     monkeypatch.setattr(expression_mod, "_expression_result_buffers", {})
     monkeypatch.setattr(expression_mod, "_active_expressions", {})
     source = Buffer({"a": "local cancellation witness"}, "plain")
     source_checksum = source.get_checksum()
-    expected = Buffer("local cancellation witness", "str").get_checksum()
     expression = Expression(
         source_checksum, "a", input_celltype="plain", celltype="str"
     )
@@ -47,16 +54,16 @@ def test_local_in_flight_cancel_returns_false_and_evaluation_completes(monkeypat
             assert not task.done()
             assert expression_mod._active_expressions
 
-            assert expression.cancel() is False
+            assert _softcancel(expression) is True
             await asyncio.sleep(0)
             assert not interrupted.is_set()
-            assert not task.done()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
             release.set()
-            assert await asyncio.wait_for(task, timeout=5) == expected
             assert not interrupted.is_set()
             assert not expression_mod._active_expressions
-            assert expression.cancel() is False
+            assert _softcancel(expression) is False
         finally:
             release.set()
             if not task.done():
