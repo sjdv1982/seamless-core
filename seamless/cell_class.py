@@ -226,18 +226,22 @@ class CellBase:
             return "unwired"
         if self._standalone_exception is not None:
             return "failed"
-        checksum = self.checksum
-        if checksum is not None:
+        if self._standalone_result_checksum is not None:
             return "complete"
-        if self._standalone_exception is not None:
-            return "failed"
+        # State inspection must not pull the recipe. A literal dummy result
+        # is already available; all other recipes wait for a demanding read
+        # or an explicit compute, even if their inputs are locally cached.
+        from .checksum_class import Checksum
+        if (isinstance(self._input_ref, Checksum) and not self._path
+                and self.input_celltype == self.celltype and self._validator is None):
+            return "complete"
         return "waiting"
 
     @property
     def exception(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.exception
-        self.checksum
+        self._sync_recipe()
         return str(self._standalone_exception) if self._standalone_exception is not None else None
 
     def clear_exception(self):
