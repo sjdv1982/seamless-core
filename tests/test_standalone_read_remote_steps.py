@@ -16,12 +16,7 @@ from tests.helpers.fake_remotes import drop_buffer, install_fake_remotes
 
 
 def _cell(checksum):
-    return Cell(
-        "str",
-        checksum=checksum,
-        input_celltype="plain",
-        path="a",
-    )
+    return Cell("plain", checksum=checksum)["a"].as_celltype("str")
 
 
 def test_database_hit_satisfies_getter(monkeypatch):

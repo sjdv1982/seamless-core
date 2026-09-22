@@ -110,7 +110,18 @@ class Expression:
         celltype = self.input_celltype if self.celltype is None else self.celltype
         from .checksum.expression import validate_expression_shape
 
-        validate_expression_shape(path, self.input_celltype, celltype)
+        # A dummy source contributes no operation, including at a deep root.
+        if (isinstance(ref, Expression) and not ref.path
+                and ref.input_celltype == ref.celltype
+                and ref.validator is None and ref.validator_language is None):
+            ref = ref._input_ref
+        from .checksum.null import is_null
+        if not path and isinstance(ref, Checksum) and is_null(ref):
+            from .buffer_class import Buffer
+            Buffer._map_celltype(self.input_celltype)
+            Buffer._map_celltype(celltype)
+        else:
+            validate_expression_shape(path, self.input_celltype, celltype)
         if (
             isinstance(ref, Expression)
             and ref.validator is None
@@ -373,6 +384,8 @@ class Expression:
 
     @property
     def input_checksum(self) -> Checksum | None:
+        if isinstance(self._input_ref, Expression):
+            return self._input_ref._result_checksum_internal()
         try:
             return Checksum(self._input_ref)
         except (TypeError, ValueError):

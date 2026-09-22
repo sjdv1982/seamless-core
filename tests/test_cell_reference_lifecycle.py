@@ -23,7 +23,6 @@ def test_checksum_cell_acquires_replaces_and_releases_input():
     assert cache.reference_snapshot().get(second, (0, 0, False))[0] == 0
 
 
-@pytest.mark.xfail(strict=False, reason="cells.md: a projection retains its parent, not a copied bare input")
 def test_derived_cell_keeps_parent_input_alive():
     buffer = Buffer(b"derived cell")
     checksum = buffer.get_checksum()
@@ -51,3 +50,21 @@ def test_cell_does_not_hold_expression_result():
     cell._release_refholds()
     clear_refholder_registry_for_tests()
     gc.collect()
+
+
+def test_cell_owns_computed_result_and_releases_it_on_recipe_change():
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless.reference_lifecycle import collect_refholder_claims
+
+    root = Cell("plain")
+    root.set({"x": "a computed Cell result with its own lifetime"})
+    child = root["x"].as_celltype("text")
+    checksum = child.checksum
+    claims = collect_refholder_claims([child])
+    assert any(owner is child and role == "result" for owner, role in claims[checksum])
+    root.set({"x": "replacement result"})
+    assert child.value == "replacement result"
+    assert checksum not in collect_refholder_claims([child])
+    current = child.checksum
+    child._release_refholds()
+    assert get_buffer_cache().reference_snapshot().get(current, (0, 0, False))[0] == 0

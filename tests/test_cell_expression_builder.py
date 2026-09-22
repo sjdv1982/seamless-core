@@ -101,7 +101,6 @@ def test_mutating_cell_after_build_does_not_affect_expression():
     assert expression.celltype == "plain"
 
 
-@pytest.mark.xfail(strict=False, reason="contract ahead of code: projection children must retain their parent link")
 def test_single_cell_builds_independent_expressions_after_reassignment():
     first_checksum = Buffer({"a": 1}, "plain").get_checksum()
     second_checksum = Buffer({"a": 2}, "plain").get_checksum()
@@ -117,7 +116,6 @@ def test_single_cell_builds_independent_expressions_after_reassignment():
     assert first.path == second.path == "a"
 
 
-@pytest.mark.xfail(strict=False, reason="contract ahead of code: as_celltype returns a pathless child of the projection")
 def test_derived_cell_navigation_does_not_mutate_parent_cell():
     parent = Cell(celltype="text")
     projected = parent[0]

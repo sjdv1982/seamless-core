@@ -1,7 +1,7 @@
 """The six projection writes: standalone refusal versus bound transaction.
 
-Paired cases in seamless-core and seamless-workflow. The documented write bugs
-are xfailed individually; authority failures never count as successful writes.
+Paired cases in seamless-core and seamless-workflow. All standalone projection writes are refused; authority failures never count
+as successful writes.
 """
 import pytest
 from seamless import Buffer, Cell
@@ -18,7 +18,6 @@ def write(cell, form, method, value):
         setattr(cell, form, value)
 
 
-@pytest.mark.xfail(strict=False, reason="feature 5 bug 5: standalone projection setters silently mutate a throwaway handle")
 @pytest.mark.parametrize("form", FORMS)
 @pytest.mark.parametrize("method", [False, True])
 def test_projection_write_matrix(form, method):
@@ -38,7 +37,7 @@ def test_projection_write_matrix(form, method):
 
 
 @pytest.mark.parametrize("form", FORMS)
-@pytest.mark.parametrize("method", [pytest.param(False, marks=pytest.mark.xfail(strict=False, reason="feature 5 bug 5: standalone projection properties silently detach")), True])
+@pytest.mark.parametrize("method", [False, True])
 def test_projection_write_under_source_is_refused(form, method):
     source = Cell("plain")
     source.set({"a": 1})

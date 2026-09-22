@@ -2,7 +2,7 @@
 
 Core creates standalone Cells; workflow binds roots and derived conversions
 into a real Context. Cases are paired; fixtures and known-gap marks differ.
-Known gaps assert the intended result under non-strict xfail, never the bug.
+Standalone cases run as ordinary regressions.
 """
 import asyncio
 import sys
@@ -14,9 +14,6 @@ from seamless.checksum.celltypes import celltypes
 from seamless.cell_errors import AuthorityError, ProjectionError
 from seamless.checksum.hash_type_validation import HashTypeValidationError
 
-
-def gap(reason):
-    return pytest.mark.xfail(strict=False, reason="cells.md contract ahead of code: " + reason)
 
 
 @pytest.fixture
@@ -202,13 +199,12 @@ def test_declared_checksum_can_convert_but_property_write_uses_output_type(world
         hold.clear()
 
 
-@gap("constructor path= must be removed (Appendix F.1a)")
 def test_constructor_rejects_path(world):
     with pytest.raises(TypeError, match="path"):
         world.make("plain", path="a")
 
 
-@pytest.mark.parametrize("name", [pytest.param("path", marks=gap("path must become read-only")), "path_python"])
+@pytest.mark.parametrize("name", ["path", "path_python"])
 @pytest.mark.parametrize("projection", [False, True])
 def test_path_is_readonly(world, name, projection):
     root = world.make("plain")
@@ -225,7 +221,7 @@ def test_path_is_readonly(world, name, projection):
     lambda c: c <= 1, lambda c: c > 1, lambda c: c >= 1,
     bool, len, iter, lambda c: c == Cell("plain"),
 ], ids=["eq", "ne", "lt", "le", "gt", "ge", "bool", "len", "iter", "cell-eq"])
-@pytest.mark.parametrize("projection", [pytest.param(False, marks=gap("root guards must move to CellBase")), True])
+@pytest.mark.parametrize("projection", [False, True])
 def test_handle_value_operations_raise_projection_error(world, operation, projection):
     root = world.make("plain")
     root.set({"a": [1, 2]})
@@ -234,7 +230,6 @@ def test_handle_value_operations_raise_projection_error(world, operation, projec
         operation(cell)
 
 
-@gap("SubCell class and exports must be removed (Appendix F.1a)")
 def test_projection_is_a_cell_without_subcell_export(world):
     import seamless
     root = world.make("plain")
@@ -244,7 +239,6 @@ def test_projection_is_a_cell_without_subcell_export(world):
     assert not hasattr(seamless, "SubCell")
 
 
-@gap("projection/conversion children must link to parents and fuse")
 def test_navigation_links_to_parent_and_fuses_paths(world):
     root = world.make("plain")
     root.set({"a": {"b": 53}})
@@ -260,7 +254,6 @@ def test_navigation_links_to_parent_and_fuses_paths(world):
     assert child.build().identity_key == Expression(root.checksum, input_celltype="plain", celltype="plain", path="a.b").identity_key
 
 
-@gap("syntax order is application order; conversion closes and rebases the chain")
 def test_conversion_before_projection_differs_from_projection_before_conversion(world):
     root = world.make("text")
     root.set("[10, 20, 30, 40]")
@@ -272,7 +265,6 @@ def test_conversion_before_projection_differs_from_projection_before_conversion(
     assert before.build().identity_key != after.build().identity_key
 
 
-@gap("one link may project OR convert; invalid rewiring must raise")
 @pytest.mark.parametrize("api", ["constructor", "with_input"])
 def test_projected_source_cannot_implicitly_convert(world, api):
     source = world.make("text")
@@ -288,7 +280,6 @@ def test_projected_source_cannot_implicitly_convert(world, api):
     assert target.value == {"unchanged": True}
 
 
-@gap("retyping a projecting consumer must refuse a conversion behind its path")
 def test_projection_cannot_be_retyped_in_place(world):
     root = world.make("plain")
     root.set({"a": 59})
@@ -298,7 +289,6 @@ def test_projection_cannot_be_retyped_in_place(world):
     assert child.celltype == "plain"
 
 
-@gap("source retyping makes projecting consumers miswired, including standalone")
 def test_source_retype_marks_consumer_miswired(world):
     source = world.make("text")
     source.set("[10, 20]")
@@ -315,7 +305,6 @@ def test_source_retype_marks_consumer_miswired(world):
     assert child.value == ","
 
 
-@gap("Cell reads must pull a not-yet-running upstream Expression (feature 5 bug 6)")
 def test_read_evaluates_upstream_expression(world):
     source = Buffer({"a": 61}, "plain")
     hold = source.tempref()
@@ -330,7 +319,6 @@ def test_read_evaluates_upstream_expression(world):
         hold.clear()
 
 
-@gap("Cell.exception becomes a string, not an exception object")
 def test_failure_is_a_stable_string_and_new_input_recovers(world):
     cell = world.make("str")
     cell.set("cannot parse as integer")
@@ -351,7 +339,6 @@ def test_failure_is_a_stable_string_and_new_input_recovers(world):
     assert cell.value == 67
 
 
-@gap("buffer and value must re-raise the same recorded evaluation failure (bug 4)")
 def test_buffer_value_report_recorded_failure_consistently(world):
     cell = world.make("str")
     cell.set("not an int")
@@ -393,7 +380,6 @@ def test_invalid_result_read_validates_and_records(world, attr):
         hold.clear()
 
 
-@gap("bound public deserialization must record failure; exception becomes a string")
 def test_deserialization_failure_is_repeatable_after_clear(world):
     source = Buffer(b"def broken(:\n")
     hold = source.tempref()
@@ -410,7 +396,6 @@ def test_deserialization_failure_is_repeatable_after_clear(world):
         hold.clear()
 
 
-@gap("Cell.fingertip is not implemented; no result must mean no work")
 def test_fingertip_without_result_never_evaluates(world, monkeypatch):
     cell = world.make("int")
     def forbidden(*args, **kwargs):
@@ -422,7 +407,6 @@ def test_fingertip_without_result_never_evaluates(world, monkeypatch):
     assert cell.state == "unwired"
 
 
-@gap("deep Cell.value must expose Checksum members and buffer must validate the index")
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
 def test_deep_value_is_typed_index_without_resolving_members(world, celltype, monkeypatch):
     member = Checksum("ac" * 32)
@@ -444,7 +428,6 @@ def test_deep_value_is_typed_index_without_resolving_members(world, celltype, mo
         hold.clear()
 
 
-@gap("projection children must keep a live parent link rather than copy its input")
 def test_snapshot_is_frozen_when_root_input_changes(world):
     root = world.make("plain")
     root.set({"a": 83})
@@ -602,7 +585,7 @@ def test_deep_one_step_selects_member_checksum(world, celltype, member_type, val
             hold.clear()
 
 
-@pytest.mark.parametrize("celltype", [pytest.param(ct, marks=gap("observed 2026-09-22: static conversion rejection precedes null short-circuit")) if ct in {"python", "ipython", "deepcell", "deepfolder", "folder", "module"} else ct for ct in celltypes + ["deepcell", "deepfolder", "folder", "module"]])
+@pytest.mark.parametrize("celltype", celltypes + ["deepcell", "deepfolder", "folder", "module"])
 def test_null_retype_keeps_checksum(world, celltype):
     cell = world.make(celltype)
     cell.set(None)
@@ -618,7 +601,6 @@ def test_null_retype_keeps_checksum(world, celltype):
     assert cell.state == "complete"
 
 
-@gap("checksum-preserving conversion + path must fuse with the converted input_celltype")
 def test_preserving_conversion_then_path_fuses(world):
     root = world.make("plain")
     root.set({"a": 173})
@@ -630,7 +612,6 @@ def test_preserving_conversion_then_path_fuses(world):
     assert actual.database_key == expected.database_key
 
 
-@gap("reformatting conversion + path must retain the converted buffer as input")
 def test_reformatting_conversion_then_path_does_not_fuse(world):
     root = world.make("str")
     root.set("word")
@@ -648,14 +629,15 @@ def test_reformatting_conversion_then_path_does_not_fuse(world):
         hold.clear()
 
 
-@gap("two conversions never fuse; text -> plain -> mixed differs from text -> mixed")
 def test_two_conversions_keep_the_intermediate_recipe(world):
     root = world.make("text")
     root.set("[1,2]")
     child = world.bind(root.as_celltype("plain").as_celltype("mixed"))
     world.settle(root, child)
     assert child.value == [1, 2]
-    intermediate = Buffer([1, 2], "plain")
+    # text -> plain preserves JSON-parseable bytes (conversion contract).
+    # Canonical serialization of [1, 2] need not have the same checksum.
+    intermediate = Buffer(b"[1,2]\n")
     hold = intermediate.tempref()
     try:
         actual = child.build()
@@ -666,7 +648,6 @@ def test_two_conversions_keep_the_intermediate_recipe(world):
         hold.clear()
 
 
-@gap("a deep step ends the fused run; child work is keyed by the member checksum")
 def test_deep_step_is_a_fusion_barrier(world):
     member = Buffer({"a": 179}, "mixed")
     indexes = [Buffer({key: member.get_checksum().hex()}, "plain") for key in ("first", "second")]

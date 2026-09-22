@@ -10,7 +10,6 @@ from .expression_class import (
     Expression,
     append_item_path,
     append_slice_path,
-    normalize_path,
 )
 
 _UNSET = object()
@@ -25,7 +24,39 @@ class CellBase:
 
     __slots__ = ("_workflow_backend", "_standalone_input_ref", "_input_celltype",
                  "_celltype", "_standalone_exception", "_standalone_result_checksum",
-                 "_refholds_released", "__weakref__")
+                 "_refholds_released", "_standalone_recipe_key", "_standalone_expression", "__weakref__")
+
+    __hash__ = object.__hash__
+
+    def _not_a_value(self, operation):
+        path = self.path if isinstance(self, Cell) else ""
+        detail = (f"sub-path projection {path!r}; check for a misspelled Cell attribute"
+                  if path else type(self).__name__)
+        raise ProjectionError(f"cannot {operation} {detail}: it is a handle, not a value; read .value")
+
+    def __eq__(self, other):
+        self._not_a_value("compare")
+
+    def __lt__(self, other):
+        self._not_a_value("order")
+
+    def __le__(self, other):
+        self._not_a_value("order")
+
+    def __gt__(self, other):
+        self._not_a_value("order")
+
+    def __ge__(self, other):
+        self._not_a_value("order")
+
+    def __bool__(self):
+        self._not_a_value("test the truth of")
+
+    def __len__(self):
+        self._not_a_value("take the length of")
+
+    def __iter__(self):
+        self._not_a_value("iterate")
 
     def build(self):
         return self._workflow_backend.build(_UNSET)
@@ -75,7 +106,7 @@ class CellBase:
         self._input_ref = input_ref
         self._input_celltype = None if input_ref is None else typed or input_celltype or self.celltype
         self._standalone_exception = None
-        self._standalone_result_checksum = None
+        self._set_result_checksum(None)
         if isinstance(old, Checksum):
             old.decref_refholder()
 
@@ -100,49 +131,41 @@ class CellBase:
         if celltype is None:
             raise TypeError("celltype must name a supported type")
         Buffer._map_celltype(celltype)
+        _check_projected_source(self.source, celltype)
+        if self._path and self.input_celltype not in ("deepcell", "deepfolder", "folder") and celltype != self.input_celltype:
+            raise TypeError("Cannot convert behind a projection; use as_celltype()")
         self._celltype = celltype
         self._standalone_exception = None
-        self._standalone_result_checksum = None
+        self._set_result_checksum(None)
 
     @property
     def checksum(self):
         if self._workflow_backend is not None:
             return self._workflow_backend.checksum
-        if self._input_ref is None:
+        self._sync_recipe()
+        if self._input_ref is None or self._miswired():
+            return None
+        if self._standalone_exception is not None:
             return None
         if self._standalone_result_checksum is not None:
             return self._standalone_result_checksum
-        if self._standalone_exception is not None:
-            return None
         from .checksum_class import Checksum
         if (isinstance(self._input_ref, Checksum) and not self._path
                 and self.input_celltype == self.celltype and self._validator is None):
-            from .checksum.null import NULL_CHECKSUM
-            if self.celltype == "bytes" and self._input_ref.hex() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855":
-                return Checksum(NULL_CHECKSUM)
-            return self._input_ref
-        input_checksum = _available_input_checksum(self._input_ref)
-        if input_checksum is None:
-            return None
+            from .checksum.null import canonicalize_checksum
+            return canonicalize_checksum(self._input_ref, self.celltype)
         from .error_envelope import RunningLoopRefusal
         try:
-            result = Expression(
-                input_checksum,
-                path=self._path,
-                input_celltype=self.input_celltype,
-                celltype=self._celltype,
-                validator=self._validator,
-                validator_language=self._validator_language,
-            ).compute()
+            expression = self.build()
+            self._standalone_expression = expression
+            result = _available_input_checksum(expression)
         except RunningLoopRefusal:
-            self._standalone_exception = None
             return None
         except Exception as exc:
             from .error_envelope import execution_error
             self._standalone_exception = execution_error(exc)
             return None
-        self._standalone_exception = None
-        self._standalone_result_checksum = result
+        self._set_result_checksum(result)
         return result
 
     @checksum.setter
@@ -155,12 +178,16 @@ class CellBase:
             return self._workflow_backend.buffer
         checksum = self.checksum
         if checksum is None:
+            if self._standalone_exception is not None:
+                raise self._standalone_exception
             return None
         try:
             from .checksum.hash_type_validation import validate_deserializable_as
-            validate_deserializable_as(checksum, self.celltype)
+            from .buffer_class import Buffer
+            celltype = Buffer._map_celltype(self.celltype)
+            validate_deserializable_as(checksum, celltype)
             buffer = checksum.resolve()
-            validate_deserializable_as(checksum, self.celltype, buffer=buffer)
+            validate_deserializable_as(checksum, celltype, buffer=buffer)
             return buffer
         except Exception as exc:
             return self._handle_materialization_error(exc)
@@ -192,6 +219,9 @@ class CellBase:
     def state(self) -> str:
         if self._workflow_backend is not None:
             return self._workflow_backend.state
+        self._sync_recipe()
+        if self._miswired():
+            return "miswired"
         if self._input_ref is None:
             return "unwired"
         if self._standalone_exception is not None:
@@ -208,7 +238,7 @@ class CellBase:
         if self._workflow_backend is not None:
             return self._workflow_backend.exception
         self.checksum
-        return self._standalone_exception
+        return str(self._standalone_exception) if self._standalone_exception is not None else None
 
     def clear_exception(self):
         if self._workflow_backend is None:
@@ -225,6 +255,8 @@ class CellBase:
         raise self._standalone_exception
 
     def _check_write_authority(self, detach):
+        if self._path:
+            raise TypeError("Standalone projection writes are not supported")
         if not detach and self.source is not None:
             from .cell_errors import AuthorityError
             raise AuthorityError("The input is controlled by a source; assign .value, .buffer or .checksum to replace it")
@@ -272,14 +304,28 @@ class CellBase:
     def set_buffer(self, buffer) -> None:
         self._write_buffer(buffer)
 
+    def _set_result_checksum(self, result):
+        old = getattr(self, "_standalone_result_checksum", None)
+        if result is not None:
+            result.incref_refholder()
+        self._standalone_result_checksum = result
+        if result is None:
+            self._standalone_expression = None
+        if old is not None:
+            old.decref_refholder()
+
     def _refheld_checksums(self):
         from .checksum_class import Checksum
 
         if getattr(self, "_refholds_released", False):
             return ()
+        claims = []
         if isinstance(self._input_ref, Checksum):
-            return ((self._input_ref, "input"),)
-        return ()
+            claims.append((self._input_ref, "input"))
+        result = getattr(self, "_standalone_result_checksum", None)
+        if result is not None:
+            claims.append((result, "result"))
+        return tuple(claims)
 
     def _release_refholds(self) -> None:
         if getattr(self, "_refholds_released", False):
@@ -290,6 +336,8 @@ class CellBase:
         input_ref = getattr(self, "_input_ref", None)
         if isinstance(input_ref, Checksum):
             input_ref.decref_refholder()
+        self._set_result_checksum(None)
+        self._standalone_expression = None
 
     def __del__(self):
         try:
@@ -303,21 +351,29 @@ class CellBase:
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.compute(input_ref, timeout=timeout)
+        if input_ref is not _UNSET:
+            return self.with_input(input_ref).compute()
+        self._sync_recipe()
+        if self._miswired():
+            return None
         try:
-            result = self.build(input_ref).compute()
+            self._standalone_expression = self.build(input_ref)
+            result = self._standalone_expression.compute()
         except Exception as exc:
             from .error_envelope import execution_error
             self._standalone_exception = execution_error(exc)
-            self._standalone_result_checksum = None
+            self._set_result_checksum(None)
             return None
         self._standalone_exception = None
-        self._standalone_result_checksum = result
+        self._set_result_checksum(result)
         return result
 
     def run(self, input_ref: Any = _UNSET):
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return self._workflow_backend.run(input_ref)
+        if input_ref is not _UNSET:
+            return self.with_input(input_ref).run()
         result = self.compute(input_ref)
         if result is None:
             if self._standalone_exception is not None:
@@ -329,19 +385,58 @@ class CellBase:
         input_ref = _input_override(input_ref)
         if self._workflow_backend is not None:
             return await self._workflow_backend.compute_async(input_ref, timeout=timeout)
+        if input_ref is not _UNSET:
+            return await self.with_input(input_ref).compute_async()
+        self._sync_recipe()
+        if self._miswired():
+            return None
         try:
-            result = await self.build(input_ref).compute_async()
+            self._standalone_expression = self.build(input_ref)
+            result = await self._standalone_expression.compute_async()
         except Exception as exc:
             from .error_envelope import execution_error
             self._standalone_exception = execution_error(exc)
-            self._standalone_result_checksum = None
+            self._set_result_checksum(None)
             return None
         self._standalone_exception = None
-        self._standalone_result_checksum = result
+        self._set_result_checksum(result)
         return result
 
     async def computation(self, timeout=None):
         return await self.compute_async(timeout=timeout)
+
+    def _sync_recipe(self):
+        key = _cell_recipe_key(self)
+        if key != self._standalone_recipe_key:
+            self._standalone_recipe_key = key
+            self._standalone_exception = None
+            self._set_result_checksum(None)
+            self._standalone_expression = None
+
+    def _miswired(self):
+        source = self.source
+        if isinstance(source, Cell) and source._workflow_backend is None and source._miswired():
+            return True
+        return bool(self._path and self.input_celltype not in ("deepcell", "deepfolder", "folder")
+                    and self.input_celltype != self.celltype)
+
+    def fingertip(self):
+        if self._workflow_backend is not None:
+            checksum = self._workflow_backend.checksum
+        else:
+            self._sync_recipe()
+            if self._standalone_exception is not None or self._miswired():
+                return None
+            checksum = self._standalone_result_checksum
+            from .checksum_class import Checksum
+            if (checksum is None and isinstance(self._input_ref, Checksum)
+                    and not self._path and self.input_celltype == self.celltype
+                    and self._validator is None):
+                from .checksum.null import canonicalize_checksum
+                checksum = canonicalize_checksum(self._input_ref, self.celltype)
+        if checksum is None:
+            return None
+        return checksum.fingertip_sync()
 
     def _repr_state(self) -> str:
         """``state=...`` for a bound cell, empty otherwise.  Never raises.
@@ -377,7 +472,7 @@ class Cell(CellBase):
     def __init__(
         self, celltype: str | None = None, *, checksum: Any = _UNSET,
         source: Any = _UNSET, input_celltype: str | None = None,
-        path: str | None = None, validator: Any = None,
+        validator: Any = None,
         validator_language: str | None = None,
     ) -> None:
         from .checksum_class import Checksum
@@ -399,13 +494,16 @@ class Cell(CellBase):
         Buffer._map_celltype(celltype)
         self._workflow_backend = None
         self._input_ref = ref
-        self._path = normalize_path(path)
+        self._path = ""
+        _check_projected_source(ref, celltype)
         self._celltype = celltype
         self._input_celltype = None if ref is None else declared or input_celltype or celltype
         self._validator = validator
         self._validator_language = validator_language
         self._standalone_exception = None
-        self._standalone_result_checksum = None
+        self._set_result_checksum(None)
+        self._standalone_recipe_key = None
+        self._standalone_expression = None
         self._refholds_released = False
         register_refholder(self)
         if isinstance(ref, Checksum):
@@ -438,14 +536,6 @@ class Cell(CellBase):
             return self._workflow_backend.path
         return self._path
 
-    @path.setter
-    def path(self, path: str | None) -> None:
-        if self._workflow_backend is not None:
-            raise _bound_state_error("path")
-        self._path = normalize_path(path)
-        self._standalone_exception = None
-        self._standalone_result_checksum = None
-
     @property
     def path_python(self) -> str:
         if self._workflow_backend is not None:
@@ -468,7 +558,7 @@ class Cell(CellBase):
             return
         self._validator = validator
         self._standalone_exception = None
-        self._standalone_result_checksum = None
+        self._set_result_checksum(None)
 
     @property
     def validator_language(self) -> str | None:
@@ -483,7 +573,7 @@ class Cell(CellBase):
             return
         self._validator_language = validator_language
         self._standalone_exception = None
-        self._standalone_result_checksum = None
+        self._set_result_checksum(None)
 
 
 
@@ -524,48 +614,50 @@ class Cell(CellBase):
 
 
     def _derive(self, **updates: Any) -> "Cell":
-        cls = updates.pop("_cls", None) or type(self)
         if self._workflow_backend is not None:
             result = self._workflow_backend.derive(**updates)
-            return result if isinstance(result, Cell) else cls._from_backend(result)
+            return result if isinstance(result, Cell) else Cell._from_backend(result)
         ref = updates.pop("_input_ref", self._input_ref)
         from .checksum_class import Checksum
         recipe = {"checksum": ref} if ref is None or isinstance(ref, Checksum) else {"source": ref}
-        clone = cls(
-            **recipe, path=self._path,
-            input_celltype=self.input_celltype if ref is self._input_ref else None,
-            celltype=self._celltype, validator=self._validator,
-            validator_language=self._validator_language,
-        )
+        clone = Cell(**recipe, celltype=self.celltype,
+                     input_celltype=self.input_celltype if ref is self._input_ref else None,
+                     validator=self.validator, validator_language=self.validator_language)
+        clone._path = self._path
         for name, value in updates.items():
             setattr(clone, name, value)
         return clone
 
     def item(self, key: Any) -> "Cell":
-        cls = SubCell if type(self) is Cell else type(self)
         if self._workflow_backend is not None:
-            return cls._from_backend(self._workflow_backend.derive_item(key))
-        return self._derive(path=append_item_path(self.path_python, key), _cls=cls)
+            return Cell._from_backend(self._workflow_backend.derive_item(key))
+        child = Cell(source=self)
+        child._path = append_item_path("", key)
+        if self.celltype in ("deepcell", "deepfolder", "folder"):
+            child._celltype = "mixed" if self.celltype == "deepcell" else "bytes"
+        return child
 
     def slice(self, start: Any = None, stop: Any = None, step: Any = None) -> "Cell":
-        cls = SubCell if type(self) is Cell else type(self)
         if self._workflow_backend is not None:
-            return cls._from_backend(
-                self._workflow_backend.derive_slice(start, stop, step)
-            )
-        return self._derive(
-            path=append_slice_path(self.path_python, start, stop, step), _cls=cls
-        )
+            return Cell._from_backend(self._workflow_backend.derive_slice(start, stop, step))
+        child = Cell(source=self)
+        child._path = append_slice_path("", start, stop, step)
+        return child
 
     def as_celltype(self, celltype: str) -> "Cell":
-        return self._derive(celltype=celltype)
+        if self._workflow_backend is not None:
+            return self._derive(celltype=celltype)
+        # An explicit conversion is a separate, pathless link.
+        child = Cell(source=self)
+        from .buffer_class import Buffer
+        Buffer._map_celltype(celltype)
+        child._celltype = celltype
+        return child
 
     def with_input(self, input_ref: Any) -> "Cell":
         return self._derive(_input_ref=input_ref)
 
-    def with_validator(
-        self, validator: Any, *, language: str | None = None
-    ) -> "Cell":
+    def with_validator(self, validator: Any, *, language: str | None = None) -> "Cell":
         return self._derive(validator=validator, validator_language=language)
 
     def build(self, input_ref: Any = _UNSET) -> Expression:
@@ -576,13 +668,11 @@ class Cell(CellBase):
         if input_ref is _UNSET:
             input_ref = _capture_workflow_source(self._input_ref)
         return Expression(
-            input_ref,
-            path=self._path,
+            input_ref, path=self._path,
             input_celltype=(_typed_input_celltype(input_ref) or self.celltype) if overridden else self.input_celltype,
-            celltype=self._celltype,
-            validator=self._validator,
+            celltype=self._celltype, validator=self._validator,
             validator_language=self._validator_language,
-    )
+        )
 
     expression = build
 
@@ -686,70 +776,6 @@ class Cell(CellBase):
         )
 
 
-class SubCell(Cell):
-    """A sub-path projection of a Cell: a handle, and never a value.
-
-    Attribute access on a Cell is *structural projection* — ``ctx.a.x`` is the
-    canonical way to source a sub-path — so a name that is not Cell API resolves
-    to a projection rather than raising.  That makes two mistakes silent, and
-    they are the same mistake: a typo (``ctx.a.vlaue``), and a name that used to
-    be API and no longer is (``ctx.a.status``).  Either way the result is an
-    object that compares unequal to everything and is truthy, so ``==`` fails
-    confusingly while ``!=``, ``is not None`` and a bare ``assert`` all pass.
-
-    A projection is loud instead.  Every operation that treats it as a *value*
-    raises :class:`~seamless.cell_errors.ProjectionError`; the operations that
-    treat it as a handle — further projection, assignment, ``.value``,
-    ``.checksum``, ``.state`` — are untouched.  A bound ``Transformer`` needs
-    none of this: it has no projection fallback, so a bad name there is already
-    an ``AttributeError`` (with Python's own "Did you mean" suggestion).
-
-    One gap has no fix.  ``x is None`` compiles to the ``IS_OP`` bytecode and
-    compares pointers, with no protocol to intercept, so
-    ``assert ctx.a.vlaue is not None`` still passes silently.  ``is None`` in the
-    other direction is safe: it evaluates false, and the assertion fails.
-    """
-
-    #: Defining ``__eq__`` would otherwise set this to ``None`` and make every
-    #: projection unhashable, breaking any set or dict of handles.
-    __hash__ = Cell.__hash__
-
-    def _not_a_value(self, operation: str):
-        path = self.path_python or "<root>"
-        raise ProjectionError(
-            f"cannot {operation} the sub-path projection {path!r}: it is a handle, "
-            f"not a value.  Read it with .value, or check whether {path!r} is a "
-            f"misspelling of a Cell attribute."
-        )
-
-    def __eq__(self, other):
-        self._not_a_value("compare")
-
-    def __lt__(self, other):
-        self._not_a_value("order")
-
-    def __le__(self, other):
-        self._not_a_value("order")
-
-    def __gt__(self, other):
-        self._not_a_value("order")
-
-    def __ge__(self, other):
-        self._not_a_value("order")
-
-    def __bool__(self):
-        self._not_a_value("test the truth of")
-
-    def __len__(self):
-        self._not_a_value("take the length of")
-
-    def __iter__(self):
-        self._not_a_value("iterate")
-
-    def __repr__(self) -> str:
-        path = self.path_python or "<root>"
-        return f"<SubCell {path!r}: a handle, not a value \u2014 read it with .value>"
-
 
 def _class_attribute(cls, name: str):
     """Return a statically defined member without invoking descriptors."""
@@ -833,7 +859,21 @@ def _available_input_checksum(value):
     if isinstance(value, Checksum):
         return value
     if isinstance(value, Expression):
-        return value._available_result()
+        if isinstance(value._input_ref, Checksum):
+            return value.compute()
+        checksum = _available_input_checksum(value._input_ref)
+        if checksum is None:
+            return None
+        # Freeze the available input so compute cannot start (or wait on) a
+        # Transformation, even when its recorded result is already available.
+        concrete = Expression(
+            checksum, path=value.path, input_celltype=value.input_celltype,
+            celltype=value.celltype, validator=value.validator,
+            validator_language=value.validator_language,
+        )
+        result = concrete.compute()
+        value._enable_result_holding()
+        return value._publish_result(result) if result is not None else None
     if isinstance(value, Cell):
         return value.checksum
     result_getter = getattr(value, "_result_checksum_internal", None)
@@ -867,3 +907,20 @@ def _checksum_for_buffer(value, celltype):
     buffer.get_value(celltype)
     buffer.tempref()
     return checksum
+
+
+def _check_projected_source(source, celltype):
+    if isinstance(source, (Cell, Expression)) and source.path and source.celltype != celltype:
+        raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
+
+
+def _cell_recipe_key(cell):
+    """Configuration-only revision key; never compare handles or pull work."""
+    ref = cell._input_ref
+    if isinstance(ref, Cell) and ref._workflow_backend is None:
+        source = _cell_recipe_key(ref)
+    else:
+        from .checksum_class import Checksum
+        source = ("checksum", ref.hex()) if isinstance(ref, Checksum) else ("object", id(ref))
+    return (source, cell.celltype, cell.input_celltype, cell._path,
+            id(cell._validator), cell._validator_language)

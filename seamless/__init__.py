@@ -71,7 +71,7 @@ def register_close_hook(hook: Callable[[], None]) -> None:
 from .checksum_class import Checksum as _Checksum
 from .buffer_class import Buffer as _Buffer
 from .expression_class import Expression as _Expression
-from .cell_class import Cell as _Cell, SubCell as _SubCell, CellBase
+from .cell_class import Cell as _Cell, CellBase
 from .cell_errors import BoundStateError, ProjectionError, AuthorityError
 from .shutdown import close
 
@@ -84,8 +84,6 @@ Expression = _Expression
 Expression.__module__ = __name__
 Cell = _Cell
 Cell.__module__ = __name__
-SubCell = _SubCell
-SubCell.__module__ = __name__
 
 __all__ = [
     "Checksum",
@@ -94,7 +92,6 @@ __all__ = [
     "Cell",
     "CellBase",
     "AuthorityError",
-    "SubCell",
     "BoundStateError",
     "ProjectionError",
     "CacheMissError",
