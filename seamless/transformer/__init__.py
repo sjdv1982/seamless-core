@@ -4,6 +4,7 @@ try:
     __all__ = [
         "direct",
         "delayed",
+        "Transformer",
         "Transformation",
         "parallel",
         "parallel_async",
