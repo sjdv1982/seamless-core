@@ -493,8 +493,9 @@ class Expression:
             id(self),
         )
 
-    def cancel(self):
-        raise RuntimeError("Expressions have no hard cancel; use softcancel()")
+    def cancel(self) -> bool:
+        """Stop this Expression from waiting without interrupting shared work."""
+        return self.softcancel()
 
 __all__ = [
     "Expression",

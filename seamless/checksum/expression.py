@@ -145,6 +145,11 @@ def evaluate_expression(
         raise NotImplementedError("Expression validators are not implemented yet")
 
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
+    parse_path(key.path)
+    from .null import is_null
+
+    if key.path or not is_null(key.input_checksum):
+        validate_expression_shape(key.path, key.input_celltype, key.celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref(scratch=True)
     cached = _expression_cache.get(cache_key)
@@ -185,6 +190,14 @@ async def evaluate_expression_async(
     expression_key = ExpressionKey(
         Checksum(input_checksum), path, input_celltype, celltype
     )
+    from .null import is_null
+
+    if expression_key.path or not is_null(expression_key.input_checksum):
+        validate_expression_shape(
+            expression_key.path,
+            expression_key.input_celltype,
+            expression_key.celltype,
+        )
     key = _cache_key(expression_key)
     from .convert import conversion_needs_buffer
 
@@ -303,6 +316,9 @@ async def _evaluate_expression_async(
         if not is_null(key.input_checksum):
             try:
                 index = get_buffer().get_value("folder")
+                from .deep import validate_deep_structure
+
+                index = validate_deep_structure(index)
             except ValueError as exc:
                 raise ExpressionEvaluationError(f"Invalid folder index: {exc}") from exc
             member_buffers = {}
@@ -373,7 +389,7 @@ async def evaluate_expression_remote(
             except ImportError:
                 pass
             else:
-                for client in buffer_remote._read_folders_clients:
+                for client in getattr(buffer_remote, "_read_folders_clients", ()):
                     buffer = await client.get_file_buffer(key.input_checksum)
                     if buffer is not None:
                         _tempref_expression_result(key.input_checksum, buffer=buffer)
@@ -734,7 +750,9 @@ def validate_expression_shape(path, source, target):
         raise ValueError(f"Unknown expression celltypes: {source!r}, {target!r}")
     try:
         steps = parse_path(path)
-    except (ExpressionEvaluationError, SyntaxError, TypeError) as exc:
+    except ExpressionEvaluationError:
+        raise
+    except (SyntaxError, TypeError) as exc:
         raise ValueError(f"Invalid path {path!r}: {exc}") from exc
     deep = source in _DEEP_CELLTYPES or target in _DEEP_CELLTYPES
     if not steps:
@@ -868,7 +886,7 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     else:
         from pathlib import Path
 
-        for client in buffer_remote._read_folders_clients:
+        for client in getattr(buffer_remote, "_read_folders_clients", ()):
             directory = getattr(client, "directory", None)
             if directory is None:
                 continue
@@ -891,7 +909,14 @@ def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:
     if input_celltype == "bytes":
         from .null import NULL_BUFFER
         return b"" if buffer.content == NULL_BUFFER else buffer.content
-    return buffer.get_value(input_celltype)
+    value = buffer.get_value(input_celltype)
+    from .deep import DEEP_CELLTYPES, validate_deep_structure
+
+    return (
+        validate_deep_structure(value)
+        if input_celltype in DEEP_CELLTYPES
+        else value
+    )
 
 
 def _serialize_expression_result(value: Any, celltype: str) -> Buffer:

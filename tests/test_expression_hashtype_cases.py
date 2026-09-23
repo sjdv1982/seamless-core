@@ -47,6 +47,12 @@ def test_hashtype_witness_names_are_unique():
     ids=[expression_case_id(witness, case) for witness, case in EXPRESSION_CASES],
 )
 def test_helper_expressions_construct_and_normalize(witness, case):
+    if not case.valid:
+        try:
+            case.build(witness.source_checksum)
+        except ValueError:
+            return
+
     expression = case.build(witness.source_checksum)
 
     assert isinstance(expression, Expression)

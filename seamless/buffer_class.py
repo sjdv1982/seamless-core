@@ -165,7 +165,22 @@ class Buffer:
         celltype = self._map_celltype(celltype)
         checksum = self.get_checksum()
         value = parse_buffer(self, checksum, celltype, copy=True)
-        return validate_deep_structure(value) if deep else value
+
+        if deep:
+            # Deep checksummed indexes retain their typed Checksum members.
+            # Other flat mappings are also plain buffers at this boundary.
+            if isinstance(value, dict) and all(
+                isinstance(member, Checksum)
+                or (
+                    isinstance(member, str)
+                    and len(member) == 64
+                    and all(char in "0123456789abcdef" for char in member)
+                )
+                for member in value.values()
+            ):
+                return validate_deep_structure(value)
+            return validate_deep_structure(value, index=False)
+        return value
 
     def decode(self):
         return self.content.decode()

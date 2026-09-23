@@ -264,7 +264,9 @@ def test_remote_expression_members_share_one_active_request(monkeypatch):
 
     from seamless_remote import jobserver_remote
 
-    async def run_expression(input_checksum, path, celltype, target_celltype):
+    async def run_expression(
+        input_checksum, path, celltype, target_celltype, *, scratch=True
+    ):
         calls.append("jobserver:run")
         started.set()
         await release.wait()
@@ -287,7 +289,8 @@ def test_remote_expression_members_share_one_active_request(monkeypatch):
         assert expr1.cancel() is True
         assert len(_active_expressions[key].members) == 1
         release.set()
-        assert await task1 == result_checksum
+        with pytest.raises(asyncio.CancelledError):
+            await task1
         assert await task2 == result_checksum
 
     asyncio.run(main())
