@@ -450,14 +450,13 @@ def test_folder_to_mixed_uses_one_dimensional_s1_arrays_for_every_child():
     assert value["nul"].tobytes() == b"ab\x00\x00"
 
 
-def test_expression_exposes_only_softcancel_and_retires_cancel():
+def test_expression_cancel_is_a_softcancel_alias():
     expression = Expression(
         Checksum(bytes.fromhex("cd" * 32)), input_celltype="plain"
     )
 
     assert expression.softcancel() is False
-    with pytest.raises((AttributeError, RuntimeError), match="softcancel"):
-        expression.cancel()
+    assert expression.cancel() is False
     assert not hasattr(expression_module, "cancel_expression")
 
 

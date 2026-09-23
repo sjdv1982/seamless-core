@@ -50,10 +50,8 @@ def test_valid_helper_expressions_evaluate_locally(witness, case):
 )
 def test_invalid_helper_expressions_fail_locally(witness, case):
     Buffer(witness.raw_buffer, checksum=witness.source_checksum)
-    expression = case.build(witness.source_checksum)
-
     with pytest.raises((ExpressionEvaluationError, TypeError, ValueError, KeyError)):
-        expression.compute()
+        case.build(witness.source_checksum).compute()
 
 
 def test_empty_path_conversion_uses_expression_cache():
