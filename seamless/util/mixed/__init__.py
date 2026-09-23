@@ -23,7 +23,7 @@ _array_types = (list, tuple, np.ndarray)
 _string_types = (str, bytes)
 
 Scalar = (type(None), bool, str, bytes) + _integer_types + _float_types
-_allowed_types = Scalar + _array_types + (np.void, dict)
+_allowed_types = Scalar + _array_types + (np.void, dict, complex, np.complexfloating)
 
 __all__ = [
     "MAGIC_NUMPY",

@@ -26,6 +26,8 @@ def _load_from_buffer(storage, form, buffer, buffer_offset, buffersize, shape):
     ctypes.memmove(data.ctypes.data, buffer.ctypes.data + buffer_offset, buffersize)
     if shape is None:
         data = data[0]
+    elif shape == () or shape == []:
+        data = data[()]
     return data
 
 
