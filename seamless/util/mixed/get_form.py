@@ -90,7 +90,7 @@ def get_tform_numpy_builtin(dt):
         typedef0 = "boolean"
     elif any([dtb == t for t in _integer_types]):
         typedef0 = "integer"
-    elif any([dtb == t for t in _float_types]):
+    elif dtb.kind == "c" or any([dtb == t for t in _float_types]):
         typedef0 = "number"
     elif is_np_str(dtb):
         typedef0 = "string"
@@ -101,6 +101,8 @@ def get_tform_numpy_builtin(dt):
         "type": typedef0,
         "bytesize": dt.base.itemsize,
     }
+    if dtb.kind == "c":
+        typedef["complex"] = True
     if typedef0 == "integer":
         unsigned = is_unsigned(dt)
         typedef["unsigned"] = unsigned
@@ -301,7 +303,10 @@ def get_form_list_plain(data):
 def get_form(data):
     if isinstance(data, bytes):
         data = np.array(data)
-    if isinstance(data, np.floating) and not np.isfinite(data):
+    if isinstance(data, (complex, np.complexfloating)):
+        data = np.asarray(data)
+        storage, typedef = "pure-binary", get_tform_numpy(data.dtype)
+    elif isinstance(data, np.floating) and not np.isfinite(data):
         # Non-finite values cannot be represented by JSON. Keeping the NumPy
         # scalar in binary storage also preserves NaN/inf when it is nested.
         storage, typedef = "pure-binary", get_tform_numpy(data.dtype)

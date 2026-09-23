@@ -249,7 +249,7 @@ def _form_to_dtype_scalar(form):
         result += str(form["bytesize"])
     elif type_ == "number":
         result = "="
-        result += "f"
+        result += "c" if form.get("complex") else "f"
         result += str(form["bytesize"])
     elif type_ == "boolean":
         result = "|b1"
