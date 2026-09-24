@@ -499,7 +499,9 @@ def capabilities(hash_type: HashType | int, source_celltype: str) -> set[str]:
         return {"SEQ"}
     if source_celltype in FLAT_SEQ_CELLTYPES:
         return {"SEQ"}
-    if source_celltype == "binary":
+    if source_celltype == "binary" or (
+        source_celltype == "mixed" and ti.kind == Kind.NUMPY
+    ):
         caps = {"SEQ"} if ti.rank != Rank.SCALAR else set()
         if ti.dtype == DType.STRUCTURED:
             caps.add("MAP")
