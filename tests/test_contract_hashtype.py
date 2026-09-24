@@ -577,14 +577,6 @@ MIXED_NPY_PATHS = [
 ]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "hashtype.md §The false-negative property vs §capabilities: `mixed` over an "
-        ".npy word has empty capabilities ('else empty'), so a path the engine "
-        "evaluates is rejected with HashTypeValidationError"
-    ),
-)
 @pytest.mark.parametrize(
     "value,steps,path", MIXED_NPY_PATHS, ids=[c[2] for c in MIXED_NPY_PATHS]
 )
@@ -593,8 +585,7 @@ def test_mixed_over_npy_path_is_not_falsely_rejected(value, steps, path):
     checksum = buffer.get_checksum()
     word = ensure_hash_type(checksum, buffer=buffer)
     assert word.kind == Kind.NUMPY
-    # The reference engine evaluates this path when the gate is lifted
-    # (verified in the phase-1 probe); HashType must not disprove it.
+    # HashType must preserve the capabilities supported by the underlying NumPy value.
     validate_expression(
         checksum, buffer=None, source_celltype="mixed",
         path_steps=steps, target_celltype="mixed",

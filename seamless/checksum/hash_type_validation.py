@@ -355,7 +355,7 @@ def _validate_path_capability(
         if source_celltype == "bytes":
             caps = set()
         elif (
-            source_celltype == "binary"
+            source_celltype in ("binary", "mixed")
             and hash_type.dtype == DType.NUMERIC
             and type(payload) is int
             and rank < Rank.D3PLUS
