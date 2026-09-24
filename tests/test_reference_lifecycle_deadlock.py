@@ -6,7 +6,7 @@ import textwrap
 import pytest
 
 
-@pytest.mark.parametrize('operation', ['incref', 'incref_refholder', 'tempref', 'register'])
+@pytest.mark.parametrize('operation', ['incref', 'incref_refholder', 'transfer_write', 'register'])
 def test_writer_import_can_finalize_expression(tmp_path, operation):
     (tmp_path / 'writer_import.py').write_text(
         'import gc\n'

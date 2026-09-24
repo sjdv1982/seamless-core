@@ -261,8 +261,10 @@ class Checksum:
 
         return get_buffer_cache().decref(self)
 
-    def incref_refholder(self, *, scratch: bool = False) -> None:
-        """Acquire an internal lifecycle reference for this checksum."""
+    def incref_refholder(self, *, scratch: bool | None = False) -> None:
+        """Acquire an internal lifecycle reference for this checksum.
+
+        ``scratch=None`` is a neutral claim; see BufferCache.incref_refholder."""
 
         get_buffer_cache().incref_refholder(self, scratch=scratch)
 
@@ -389,7 +391,6 @@ class Checksum:
             try:
                 from seamless.checksum.expression import (
                     evaluate_expression_async,
-                    get_expression_cache,
                 )
 
                 input_checksum = Checksum(expression["checksum"])
@@ -400,18 +401,12 @@ class Checksum:
                     await input_checksum.fingertip()
                 except CacheMissError:
                     pass
-                cache_key = (
-                    input_checksum.hex(),
-                    path,
-                    source_celltype,
-                    celltype,
-                )
-                get_expression_cache().pop(cache_key, None)
                 result = await evaluate_expression_async(
                     input_checksum,
                     path,
                     source_celltype,
                     celltype,
+                    materialize=True,
                 )
                 if Checksum(result) != self:
                     continue

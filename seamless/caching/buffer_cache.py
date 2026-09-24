@@ -288,17 +288,24 @@ class BufferCache:
         checksum: Checksum,
         *,
         buffer: Optional[Buffer] = None,
-        scratch: bool = False,
+        scratch: bool | None = False,
     ) -> None:
-        """Acquire one logical lifecycle reference for ``checksum``."""
+        """Acquire one logical lifecycle reference for ``checksum``.
+
+        ``scratch=False`` is an owner's non-scratch claim: it clears scratch
+        status and publishes. ``scratch=True`` is a scratch owner's claim.
+        ``scratch=None`` is a neutral claim (a snapshot, an in-flight lease):
+        it protects the buffer from eviction and neither publishes nor changes
+        scratch status.
+        """
 
         with self.lock:
-            if scratch:
+            if scratch is True:
                 self._scratch_refs.add(checksum)
-            else:
+            elif scratch is False:
                 self._scratch_refs.discard(checksum)
             entry, write_buffer = self._ensure_entry_locked(
-                checksum, buffer=buffer, scratch=scratch
+                checksum, buffer=buffer, scratch=scratch is not False
             )
             count = self.refholder_counts.get(checksum, 0)
             if count == 0:

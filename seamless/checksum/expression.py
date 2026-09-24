@@ -49,6 +49,7 @@ class _ActiveExpression:
     waiters: dict = field(default_factory=dict)
     linger: asyncio.TimerHandle | None = None
     scratch: bool = True
+    dispatched_scratch: bool | None = None
     input_claim: Checksum | None = None
 
     def hold_input(self, checksum):
@@ -137,8 +138,13 @@ def evaluate_expression(
     *,
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
+    materialize: bool = False,
 ) -> Checksum:
-    """Evaluate an expression locally and return the result checksum."""
+    """Evaluate an expression locally and return the result checksum.
+
+    With ``materialize``, a cached result checksum is an answer only when its
+    buffer is in this process; otherwise the Expression is evaluated again.
+    """
 
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
@@ -153,7 +159,7 @@ def evaluate_expression(
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
-    if cached is not None:
+    if cached is not None and (not materialize or _has_local_buffer(cached)):
         _tempref_expression_result(cached)
         return cached
 
@@ -183,8 +189,13 @@ async def evaluate_expression_async(
     validator=None,
     validator_language=None,
     member_id=None,
+    materialize=False,
 ):
-    """Share one local evaluator task for each complete Expression identity."""
+    """Share one local evaluator task for each complete Expression identity.
+
+    With ``materialize``, a cached result checksum is an answer only when its
+    buffer is in this process; otherwise the Expression is evaluated again.
+    """
     if validator is not None or validator_language is not None:
         raise NotImplementedError("Expression validators are not implemented yet")
     expression_key = ExpressionKey(
@@ -201,14 +212,17 @@ async def evaluate_expression_async(
     key = _cache_key(expression_key)
     from .convert import conversion_needs_buffer
 
-    if key in _expression_cache or (
+    cached = _expression_cache.get(key)
+    if (
+        cached is not None and (not materialize or _has_local_buffer(cached))
+    ) or (
         not path
         and not conversion_needs_buffer(
             expression_key.input_checksum, input_celltype, celltype
         )
     ):
         return await _evaluate_expression_async(
-            input_checksum, path, input_celltype, celltype
+            input_checksum, path, input_celltype, celltype, materialize=materialize
         )
     member = object() if member_id is None else member_id
     with _active_expression_lock:
@@ -227,6 +241,7 @@ async def evaluate_expression_async(
                         celltype,
                         validator=validator,
                         validator_language=validator_language,
+                        materialize=materialize,
                     )
                 except BaseException as exc:
                     if not active.result_future.done():
@@ -264,6 +279,7 @@ async def _evaluate_expression_async(
     *,
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
+    materialize: bool = False,
 ) -> Checksum:
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
@@ -273,7 +289,7 @@ async def _evaluate_expression_async(
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
-    if cached is not None:
+    if cached is not None and (not materialize or _has_local_buffer(cached)):
         _tempref_expression_result(cached)
         return cached
 
@@ -349,24 +365,33 @@ async def evaluate_expression_remote(
     member_id: object | None = None,
     scratch: bool = True,
 ) -> Checksum:
-    """Evaluate an expression with remote cache lookup and optional jobserver dispatch."""
+    """Evaluate an expression with remote cache lookup and optional jobserver dispatch.
+
+    ``scratch=False`` is a request for the bytes: the answer must be a result
+    checksum whose buffer this process can reach (in memory, or on the
+    hashserver). A cached checksum without a reachable buffer is not an
+    answer; the Expression is then materialized, locally or on the executing
+    side, which writes the result because the request is non-scratch.
+    """
 
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
         raise NotImplementedError("Expression validators are not implemented yet")
+    materialize = not scratch
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
-    cached = _expression_cache.get(cache_key)
-    if cached is not None:
-        _tempref_expression_result(cached)
-        return cached
+    known = _expression_cache.get(cache_key)
+    if known is not None:
+        if not materialize or await _result_reachable(known):
+            _tempref_expression_result(known)
+            return known
 
     try:
         from seamless_remote import database_remote
     except ImportError:
         database_remote = None
-    if database_remote is not None:
+    if database_remote is not None and known is None:
         result = await database_remote.get_expression_result(
             key.input_checksum,
             key.path,
@@ -375,8 +400,26 @@ async def evaluate_expression_remote(
         )
         if result is not None:
             _expression_cache[cache_key] = result
-            _tempref_expression_result(result)
-            return result
+            if not materialize or await _result_reachable(result):
+                _tempref_expression_result(result)
+                return result
+            known = result
+
+    from .convert import conversion_needs_buffer
+
+    needs_input = bool(key.path) or conversion_needs_buffer(
+        key.input_checksum, key.input_celltype, key.celltype
+    )
+    if (
+        known is not None
+        and needs_input
+        and not await _result_reachable(key.input_checksum)
+    ):
+        # Materializing a known result whose input is reachable nowhere: there
+        # is nothing to evaluate from. Recovering it is fingertip's job.
+        from seamless import CacheMissError
+
+        raise CacheMissError(known)
 
     location = execution
     if location == "auto":
@@ -410,15 +453,27 @@ async def evaluate_expression_remote(
             key.input_celltype,
             key.celltype,
             member_id=member_id,
+            materialize=materialize,
         )
     elif location == "remote":
-        return await _run_active_remote_expression(
+        result, active = await _run_active_remote_expression(
             key,
             cache_key,
             database_remote=database_remote,
             scratch=scratch,
             member_id=member_id,
         )
+        if (
+            materialize
+            and active.dispatched_scratch
+            and not await _result_reachable(result)
+        ):
+            # Joined a scratch dispatch that was already underway: its result
+            # was not written. Ask once more, non-scratch, without joining.
+            result = await _dispatch_remote_expression(key, scratch=False)
+            _expression_cache[cache_key] = result
+            _tempref_expression_result(result)
+        return result
     else:
         raise ValueError(f"Unknown expression execution location: {location!r}")
 
@@ -470,9 +525,34 @@ async def _run_active_remote_expression(
         active.scratch = active.scratch and scratch
         waiter = _join_expression(active, member)
     try:
-        return await asyncio.shield(waiter)
+        return await asyncio.shield(waiter), active
     finally:
         softcancel_expression(cache_key, member)
+
+
+async def _dispatch_remote_expression(key: ExpressionKey, *, scratch: bool) -> Checksum:
+    """Send one Expression request to the jobserver or daskserver."""
+    try:
+        from seamless_remote import jobserver_remote
+    except ImportError as exc:
+        raise ExpressionEvaluationError(
+            "Remote expression evaluation requires seamless_remote"
+        ) from exc
+    dispatch = jobserver_remote.run_expression
+    if not jobserver_remote.has_jobserver() and _has_daskserver():
+        from seamless_remote import daskserver_remote
+
+        dispatch = daskserver_remote.run_expression
+    # Always pass scratch explicitly: scratch=False asks the executing side to
+    # materialize the result and write it, so it must never be left implicit.
+    result = await dispatch(
+        key.input_checksum,
+        key.path,
+        key.input_celltype,
+        key.celltype,
+        scratch=bool(scratch),
+    )
+    return Checksum(result)
 
 
 async def _execute_remote_expression(
@@ -482,29 +562,8 @@ async def _execute_remote_expression(
     database_remote,
 ) -> None:
     try:
-        try:
-            from seamless_remote import jobserver_remote
-        except ImportError as exc:
-            raise ExpressionEvaluationError(
-                "Remote expression evaluation requires seamless_remote"
-            ) from exc
-        dispatch = jobserver_remote.run_expression
-        if not jobserver_remote.has_jobserver() and _has_daskserver():
-            from seamless_remote import daskserver_remote
-
-            dispatch = daskserver_remote.run_expression
-        # Always pass scratch explicitly; do not rely on the receiver's
-        # default (seamless-transformer, seamless-remote and seamless-jobserver
-        # all default their own `scratch` parameter to False deliberately).
-        kwargs = {"scratch": bool(active.scratch)}
-        result = await dispatch(
-            key.input_checksum,
-            key.path,
-            key.input_celltype,
-            key.celltype,
-            **kwargs,
-        )
-        result = Checksum(result)
+        active.dispatched_scratch = bool(active.scratch)
+        result = await _dispatch_remote_expression(key, scratch=active.scratch)
         _expression_cache[cache_key] = result
         _tempref_expression_result(result)
         if database_remote is not None:
@@ -914,6 +973,36 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     from seamless import CacheMissError
 
     raise CacheMissError(checksum)
+
+
+def _has_local_buffer(checksum: Checksum) -> bool:
+    from seamless import CacheMissError
+
+    try:
+        _get_local_buffer(Checksum(checksum))
+    except CacheMissError:
+        return False
+    return True
+
+
+async def _result_reachable(checksum: Checksum) -> bool:
+    """True when this process can obtain the buffer: in memory, or remotely."""
+    checksum = Checksum(checksum)
+    if _has_local_buffer(checksum):
+        return True
+    try:
+        from seamless_remote import buffer_remote
+    except ImportError:
+        return False
+    try:
+        lengths = await buffer_remote.get_buffer_lengths([checksum])
+    except Exception:
+        return False
+    if not lengths:
+        return False
+    length = lengths[0]
+    # The hashserver answers False for a missing buffer; bool is an int subclass.
+    return isinstance(length, int) and not isinstance(length, bool) and length >= 0
 
 
 def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:

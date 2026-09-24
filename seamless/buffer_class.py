@@ -211,7 +211,7 @@ class Buffer:
         checksum = self.get_checksum()
         return checksum.decref()
 
-    def incref_refholder(self, *, scratch: bool = False) -> None:
+    def incref_refholder(self, *, scratch: bool | None = False) -> None:
         """Acquire an internal lifecycle reference for this buffer's checksum."""
 
         from seamless.caching.buffer_cache import get_buffer_cache

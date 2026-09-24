@@ -164,19 +164,24 @@ def test_expression_failures_are_not_cached_and_are_retried(monkeypatch):
 
 
 def test_expression_evaluation_does_not_publish_without_a_refholder(monkeypatch):
+    from seamless.caching import buffer_writer
     from seamless.caching.buffer_cache import get_buffer_cache
 
     source = Buffer({"value": "ephemeral"}, "plain")
     source_checksum = source.get_checksum()
     cache = get_buffer_cache()
-    original_tempref = type(cache).tempref
-    observed = []
+    original_transfer_write = type(cache).transfer_write
+    transfer_writes = []
+    registered = []
 
-    def observe_tempref(self, checksum, *args, **kwargs):
-        observed.append((Checksum(checksum), kwargs.get("scratch", False)))
-        return original_tempref(self, checksum, *args, **kwargs)
+    def observe_transfer_write(self, checksum, *args, **kwargs):
+        transfer_writes.append(Checksum(checksum))
+        return original_transfer_write(self, checksum, *args, **kwargs)
 
-    monkeypatch.setattr(type(cache), "tempref", observe_tempref)
+    monkeypatch.setattr(type(cache), "transfer_write", observe_transfer_write)
+    monkeypatch.setattr(
+        buffer_writer, "register", lambda buffer: registered.append(buffer.get_checksum())
+    )
     expression = Expression(
         source_checksum,
         path="value",
@@ -185,8 +190,9 @@ def test_expression_evaluation_does_not_publish_without_a_refholder(monkeypatch)
     )
     result = expression.compute(execution="local")
 
-    assert (result, True) in observed
-    assert (result, False) not in observed
+    assert result not in transfer_writes
+    assert result not in registered
+    assert cache.is_scratch_ref(result)
 
 
 def test_dummy_expression_preserves_its_checksum_without_fetching(monkeypatch):

@@ -180,22 +180,25 @@ def test_live_and_expired_temprefs_are_independent_on_both_decrement_paths():
         assert checksum not in cache.strong_cache
 
 
-@pytest.mark.parametrize("protection", ["none", "bridge", "manual", "tempref"])
+@pytest.mark.parametrize("protection", ["none", "bridge", "manual", "transfer_write"])
 def test_scratch_purge_respects_each_protection_kind(protection):
     cache = make_cache()
     buf = Buffer(f"scratch-purge-{protection}".encode())
     checksum = buf.get_checksum()
     cache.register(checksum, buf, size=len(buf.content))
-    cache.tempref(checksum, scratch=True)
+    cache.tempref(checksum)
+    cache.mark_scratch(checksum)
     if protection == "bridge":
         cache.incref_refholder(checksum, scratch=True)
     elif protection == "manual":
         cache.incref(checksum, scratch=True)
-    elif protection == "tempref":
-        cache.tempref(checksum, scratch=False)
+    elif protection == "transfer_write":
+        # A transfer write is no claim: the local copy of a buffer held only by
+        # a tempref stays purgeable (the hashserver copy is the durable one).
+        cache.transfer_write(checksum)
 
     purged = cache.purge_scratch(checksum)
-    if protection == "none":
+    if protection in ("none", "transfer_write"):
         assert purged == 1
         assert checksum not in cache.strong_cache
     else:
@@ -208,8 +211,10 @@ def test_scratch_first_then_non_scratch_acquisition_registers_monotonically():
     buf = Buffer(b"scratch-upgrade")
     checksum = buf.get_checksum()
     cache.register(checksum, buf, size=len(buf.content))
-    cache.tempref(checksum, scratch=True)
+    cache.tempref(checksum)
+    cache.mark_scratch(checksum)
     assert cache.strong_cache[checksum].remote_registered is False
+    assert cache.is_scratch_ref(checksum) is True
     cache.incref_refholder(checksum, scratch=False)
     assert cache.strong_cache[checksum].remote_registered is True
     assert cache.is_scratch_ref(checksum) is False
