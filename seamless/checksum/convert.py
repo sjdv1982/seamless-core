@@ -166,9 +166,21 @@ def _convert(
             next_get_buffer = get_buffer
         else:
             next_get_buffer = _LazyBuffer(lambda: intermediate_buffer)
-        return _convert(
+        result_checksum, result_buffer = _convert(
             intermediate_checksum, intermediate, target, next_get_buffer
         )
+        if result_buffer is None:
+            if result_checksum == checksum:
+                return checksum, None
+            if (
+                intermediate_buffer is None
+                or result_checksum != intermediate_checksum
+            ):
+                raise AssertionError(
+                    "A conversion chain lost the buffer for its new checksum"
+                )
+            return result_checksum, intermediate_buffer
+        return result_checksum, result_buffer
 
     if conv in conversion_forbidden:
         raise SeamlessConversionError(
