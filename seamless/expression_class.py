@@ -335,7 +335,7 @@ class Expression:
         if result is None:
             return None
         checksum = Checksum(result)
-        checksum.tempref(scratch=True)
+        checksum.tempref()
         old = self._result_checksum
         if old is not None and old == checksum:
             if self._refhold_result and not self._result_refheld:
@@ -468,7 +468,7 @@ class Expression:
 
     def compute(self, *, execution: str = "auto") -> Checksum | None:
         self._enable_result_holding()
-        return self._evaluate_internal(execution=execution, scratch=False)
+        return self._evaluate_internal(execution=execution)
 
     def run(self, *, execution: str = "auto") -> Any:
         from .checksum.expression import resolve_expression_value

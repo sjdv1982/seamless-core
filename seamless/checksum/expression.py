@@ -151,7 +151,7 @@ def evaluate_expression(
     if key.path or not is_null(key.input_checksum):
         validate_expression_shape(key.path, key.input_celltype, key.celltype)
     cache_key = _cache_key(key)
-    key.input_checksum.tempref(scratch=True)
+    key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
     if cached is not None:
         _tempref_expression_result(cached)
@@ -271,7 +271,7 @@ async def _evaluate_expression_async(
 
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
-    key.input_checksum.tempref(scratch=True)
+    key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
     if cached is not None:
         _tempref_expression_result(cached)
@@ -356,7 +356,7 @@ async def evaluate_expression_remote(
         raise NotImplementedError("Expression validators are not implemented yet")
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
-    key.input_checksum.tempref(scratch=True)
+    key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
     if cached is not None:
         _tempref_expression_result(cached)
@@ -493,7 +493,10 @@ async def _execute_remote_expression(
             from seamless_remote import daskserver_remote
 
             dispatch = daskserver_remote.run_expression
-        kwargs = {"scratch": True} if active.scratch else {}
+        # Always pass scratch explicitly; do not rely on the receiver's
+        # default (seamless-transformer, seamless-remote and seamless-jobserver
+        # all default their own `scratch` parameter to False deliberately).
+        kwargs = {"scratch": bool(active.scratch)}
         result = await dispatch(
             key.input_checksum,
             key.path,
@@ -621,7 +624,7 @@ def _evaluate_expression_after_validation(
         result_buffer = Buffer(NULL_BUFFER)
         result = result_buffer.get_checksum()
         _expression_cache[cache_key] = result
-        _tempref_expression_result(result, buffer=result_buffer)
+        _tempref_expression_result(result, buffer=result_buffer, produced=True)
         return result
     if key.path == "" and key.input_celltype == key.celltype:
         # Validation rejects known structural incompatibilities without requiring
@@ -663,7 +666,7 @@ def _evaluate_expression_after_validation(
                 raise ExpressionEvaluationError("Conversion result checksum mismatch")
             _expression_result_buffers[result_checksum] = result_buffer
         _expression_cache[cache_key] = result_checksum
-        _tempref_expression_result(result_checksum, buffer=result_buffer)
+        _tempref_expression_result(result_checksum, buffer=result_buffer, produced=True)
         return result_checksum
 
     assert input_buffer is not None
@@ -698,25 +701,32 @@ def _evaluate_expression_after_validation(
     result_checksum = result_buffer.get_checksum()
     _expression_cache[cache_key] = result_checksum
     _expression_result_buffers[result_checksum] = result_buffer
-    _tempref_expression_result(result_checksum, buffer=result_buffer)
+    _tempref_expression_result(result_checksum, buffer=result_buffer, produced=True)
     return result_checksum
 
 
 def _tempref_expression_result(
-    checksum: Checksum, *, buffer: Buffer | None = None
+    checksum: Checksum, *, buffer: Buffer | None = None, produced: bool = False
 ) -> None:
-    """Keep successful results in memory without requesting publication."""
+    """Keep successful results in memory without requesting publication.
+
+    ``produced`` marks a buffer this evaluation created as scratch: nobody has
+    decided to hold it. A checksum that already existed (the input itself, a
+    deep member, a cached result) keeps whatever scratch status it had.
+    """
 
     checksum = Checksum(checksum)
     if buffer is None:
-        checksum.tempref(scratch=True)
+        checksum.tempref()
     else:
         from seamless.caching.buffer_cache import get_buffer_cache
 
         from .hash_type import register_hash_type_for_buffer
 
         register_hash_type_for_buffer(checksum, buffer)
-        get_buffer_cache().tempref(checksum, buffer=buffer, scratch=True)
+        get_buffer_cache().tempref(checksum, buffer=buffer)
+    if produced:
+        checksum.mark_scratch()
 
 
 def resolve_expression_value(

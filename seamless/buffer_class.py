@@ -232,11 +232,12 @@ class Buffer:
         interest: float = 128.0,
         fade_factor: float = 2.0,
         fade_interval: float = 2.0,
-        scratch: bool = False,
     ) -> "TempRef":
         """Add or refresh a single tempref. Only one tempref allowed per checksum.
 
-        If scratch is True, keep the tempref scratch-only (no remote registration).
+        A tempref is always scratch (bounded, ephemeral, no remote
+        registration). To publish this buffer remotely on a requester's
+        behalf, call `transfer_write` explicitly.
         """
         # local import to avoid importing caching at module import time
         from seamless.caching.buffer_cache import get_buffer_cache
@@ -248,8 +249,23 @@ class Buffer:
             interest=interest,
             fade_factor=fade_factor,
             fade_interval=fade_interval,
-            scratch=scratch,
         )
+
+    def transfer_write(self) -> None:
+        """Publish this buffer to the remote store (the "transfer write").
+        See BufferCache.transfer_write for the full contract."""
+        # local import to avoid importing caching at module import time
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        checksum = self.get_checksum()
+        return get_buffer_cache().transfer_write(checksum, buffer=self)
+
+    def mark_scratch(self) -> None:
+        """Record a producer's decision that this buffer is scratch.
+        See BufferCache.mark_scratch."""
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        get_buffer_cache().mark_scratch(self.get_checksum())
 
     async def write(self) -> bool:
         """Write the buffer to remote server(s), if any have been configured
