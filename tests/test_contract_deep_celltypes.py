@@ -6,7 +6,6 @@ This file adds the exhaustive zero-path table, the flatness phase table, the
 validator's failure shapes, folder -> mixed all-or-nothing / non-sticky, and the
 value rule ({key: Checksum}) at the value layers.
 
-Known gaps are non-strict xfails that assert the contract, never the bug.
 """
 import numpy as np
 import pytest
@@ -25,7 +24,6 @@ from seamless.checksum.hash_type_validation import (
 from seamless.error_envelope import error_kind
 
 DEEP = ("deepcell", "deepfolder", "folder")
-DOC = "deep-celltypes.md"
 
 LEGAL_ZERO_PATH = {
     ("deepcell", "deepcell"),
@@ -167,21 +165,12 @@ def test_one_step_path_fails_a_false_deep_claim_as_expression_evaluation_error(b
     assert error_kind(info.value) == "expression_evaluation"
 
 
-_SYNC_FOLDER_GAP = pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §When flatness is checked: the sync folder -> mixed path "
-    "(_evaluate_expression_after_validation) parses the index with the lenient "
-    "Buffer.get_value and never calls the shared validator; a non-hex member "
-    "crashes with AttributeError instead of ExpressionEvaluationError",
-)
-
-
 @pytest.mark.parametrize(
     "bad_index",
     [
         pytest.param({"n": {"x": "aa" * 32}}, id="nested"),
-        pytest.param({"n": "not a checksum"}, id="text", marks=_SYNC_FOLDER_GAP),
-        pytest.param({"n": "AA" * 32}, id="uppercase", marks=_SYNC_FOLDER_GAP),
+        pytest.param({"n": "not a checksum"}, id="text"),
+        pytest.param({"n": "AA" * 32}, id="uppercase"),
     ],
 )
 def test_folder_to_mixed_fails_a_false_deep_claim_as_expression_evaluation_error(bad_index):
@@ -211,12 +200,6 @@ def test_shared_validator_raises_value_error_naming_the_offence(bad, match):
     assert not isinstance(info.value, HashTypeValidationError)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §When flatness is checked: reading .value at a deep celltype must reject "
-    "a flat dict whose members are not 64-hex checksums; Buffer.get_value falls back to "
-    "validate_deep_structure(index=False) and returns it",
-)
 @pytest.mark.parametrize("celltype", DEEP)
 @pytest.mark.parametrize(
     "not_an_index",
@@ -229,11 +212,6 @@ def test_reading_value_at_deep_celltype_rejects_a_flat_non_index(celltype, not_a
         buffer.get_value(celltype)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §When flatness is checked: Cell.value at a deep celltype over a flat "
-    "non-index must fail; the code returns the raw dict and records no exception",
-)
 @pytest.mark.parametrize("celltype", DEEP)
 def test_cell_value_at_deep_celltype_rejects_a_flat_non_index(celltype):
     buffer = _held({"k": "hello"}, "plain")

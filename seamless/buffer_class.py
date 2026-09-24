@@ -167,19 +167,7 @@ class Buffer:
         value = parse_buffer(self, checksum, celltype, copy=True)
 
         if deep:
-            # Deep checksummed indexes retain their typed Checksum members.
-            # Other flat mappings are also plain buffers at this boundary.
-            if isinstance(value, dict) and all(
-                isinstance(member, Checksum)
-                or (
-                    isinstance(member, str)
-                    and len(member) == 64
-                    and all(char in "0123456789abcdef" for char in member)
-                )
-                for member in value.values()
-            ):
-                return validate_deep_structure(value)
-            return validate_deep_structure(value, index=False)
+            return validate_deep_structure(value)
         return value
 
     def decode(self):
@@ -193,9 +181,14 @@ class Buffer:
         It must not be modified.
         """
         from .checksum.parse_buffer import parse_buffer
+        from .checksum.deep import DEEP_CELLTYPES, validate_deep_structure
 
+        deep = celltype in DEEP_CELLTYPES
         celltype = self._map_celltype(celltype)
-        return await parse_buffer(self, self.checksum, celltype, copy=copy)
+        value = await parse_buffer(self, self.checksum, celltype, copy=copy)
+        if deep:
+            return validate_deep_structure(value)
+        return value
 
     def incref(self) -> None:
         """Increment normal refcount in the buffer cache."""
