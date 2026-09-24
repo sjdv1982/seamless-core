@@ -288,17 +288,24 @@ class BufferCache:
         checksum: Checksum,
         *,
         buffer: Optional[Buffer] = None,
-        scratch: bool = False,
+        scratch: bool | None = False,
     ) -> None:
-        """Acquire one logical lifecycle reference for ``checksum``."""
+        """Acquire one logical lifecycle reference for ``checksum``.
+
+        ``scratch=False`` is an owner's non-scratch claim: it clears scratch
+        status and publishes. ``scratch=True`` is a scratch owner's claim.
+        ``scratch=None`` is a neutral claim (a snapshot, an in-flight lease):
+        it protects the buffer from eviction and neither publishes nor changes
+        scratch status.
+        """
 
         with self.lock:
-            if scratch:
+            if scratch is True:
                 self._scratch_refs.add(checksum)
-            else:
+            elif scratch is False:
                 self._scratch_refs.discard(checksum)
             entry, write_buffer = self._ensure_entry_locked(
-                checksum, buffer=buffer, scratch=scratch
+                checksum, buffer=buffer, scratch=scratch is not False
             )
             count = self.refholder_counts.get(checksum, 0)
             if count == 0:
@@ -368,19 +375,23 @@ class BufferCache:
         interest: float = 128.0,
         fade_factor: float = 2.0,
         fade_interval: float = 2.0,
-        scratch: bool = False,
     ) -> TempRef:
         """Add or refresh a single tempref for checksum. Only one tempref allowed per checksum.
 
-        If scratch is True, keep the tempref scratch-only (no remote registration).
+        A tempref is always scratch: bounded, unattributed, ephemeral local
+        interest. It never triggers remote registration (no buffer_writer
+        write), no matter who holds it. To publish a buffer remotely on a
+        requester's behalf (the "transfer write"), call `transfer_write`
+        explicitly instead.
+
+        A tempref is also neutral about scratch *status*: it neither adds the
+        checksum to the scratch-ref set nor removes it. Scratch status records
+        an owner's or producer's decision (`mark_scratch`, or a scratch
+        incref/refholder), not the mere absence of a durable claim.
         """
         with self.lock:
-            if scratch:
-                self._scratch_refs.add(checksum)
-            else:
-                self._scratch_refs.discard(checksum)
-            entry, write_buffer = self._ensure_entry_locked(
-                checksum, buffer=buffer, scratch=scratch
+            entry, _write_buffer = self._ensure_entry_locked(
+                checksum, buffer=buffer, scratch=True
             )
             if entry.tempref is None:
                 entry.tempref = TempRef(
@@ -388,7 +399,7 @@ class BufferCache:
                     fade_factor=fade_factor,
                     fade_interval=fade_interval,
                 )
-                entry.tempref_scratch = scratch
+                entry.tempref_scratch = True
             else:
                 eref = entry.tempref
                 if (
@@ -400,10 +411,58 @@ class BufferCache:
                     entry.tempref.fade_factor = fade_factor
                     entry.tempref.fade_interval = fade_interval
                 entry.tempref.refresh()
-                entry.tempref_scratch = scratch
+                entry.tempref_scratch = True
+        return entry.tempref
+
+    def transfer_write(
+        self,
+        checksum: Checksum,
+        *,
+        buffer: Optional[Buffer] = None,
+    ) -> None:
+        """Publish a buffer to the remote store on a requester's behalf.
+
+        This is the "transfer write": the only legitimate non-holder write of
+        a buffer, performed by the executing side when a requester's request
+        declares scratch=False (see
+        seamless/docs/agent/contracts/expressions.md, "The requester's
+        scratch decision", and internal/checksum-reference-lifecycle.md). It
+        reproduces exactly the remote-registration side effect a non-scratch
+        tempref used to have, and nothing else:
+
+        - checksum is removed from the scratch-ref set, regardless of any
+          tempref/incref currently held on it,
+        - the entry (created if necessary) is marked remote_registered,
+        - the buffer is handed to buffer_writer now if it is already known
+          (passed in here, already attached to the entry, or sitting in the
+          weak cache), or -- if it is not yet known -- the write is deferred
+          until a buffer is later attached via `register()`, which checks
+          `entry.remote_registered` for exactly this purpose.
+
+        A strong entry is created when none exists purely so that
+        `remote_registered=True` has somewhere to live until the buffer shows
+        up; this call adds no ref/interest of its own, so an entry created
+        only by `transfer_write` (with no tempref/incref/refholder on top of
+        it) remains immediately eligible for local eviction -- the remote
+        copy is durable independently of the local cache.
+        """
+        with self.lock:
+            self._scratch_refs.discard(checksum)
+            entry, write_buffer = self._ensure_entry_locked(
+                checksum, buffer=buffer, scratch=False
+            )
         if write_buffer is not None:
             buffer_writer.register(write_buffer)
-        return entry.tempref
+
+    def mark_scratch(self, checksum: Checksum) -> None:
+        """Record a producer's decision that checksum is scratch.
+
+        Adds checksum to the scratch-ref set, exactly as a scratch
+        incref/refholder does, without adding any interest of its own. A later
+        non-scratch incref/refholder or `transfer_write` removes it again.
+        """
+        with self.lock:
+            self._scratch_refs.add(checksum)
 
     def purge_scratch(self, checksum: Checksum | None = None) -> int:
         """Drop strong/weak cache entries held only by scratch temprefs.

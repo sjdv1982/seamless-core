@@ -261,8 +261,10 @@ class Checksum:
 
         return get_buffer_cache().decref(self)
 
-    def incref_refholder(self, *, scratch: bool = False) -> None:
-        """Acquire an internal lifecycle reference for this checksum."""
+    def incref_refholder(self, *, scratch: bool | None = False) -> None:
+        """Acquire an internal lifecycle reference for this checksum.
+
+        ``scratch=None`` is a neutral claim; see BufferCache.incref_refholder."""
 
         get_buffer_cache().incref_refholder(self, scratch=scratch)
 
@@ -276,11 +278,12 @@ class Checksum:
         interest: float = 128.0,
         fade_factor: float = 2.0,
         fade_interval: float = 2.0,
-        scratch: bool = False,
     ) -> "TempRef":
         """Add or refresh a single tempref. Only one tempref allowed per checksum.
 
-        If scratch is True, keep the tempref scratch-only (no remote registration).
+        A tempref is always scratch (bounded, ephemeral, no remote
+        registration). To publish this checksum's buffer remotely on a
+        requester's behalf, call `transfer_write` explicitly.
         """
 
         return get_buffer_cache().tempref(
@@ -288,8 +291,19 @@ class Checksum:
             interest=interest,
             fade_factor=fade_factor,
             fade_interval=fade_interval,
-            scratch=scratch,
         )
+
+    def transfer_write(self, buffer=None) -> None:
+        """Publish this checksum's buffer to the remote store (the "transfer
+        write"). See BufferCache.transfer_write for the full contract."""
+
+        return get_buffer_cache().transfer_write(self, buffer=buffer)
+
+    def mark_scratch(self) -> None:
+        """Record a producer's decision that this checksum is scratch.
+        See BufferCache.mark_scratch."""
+
+        get_buffer_cache().mark_scratch(self)
 
     async def fingertip(self, celltype=None):
         """Return a resolvable buffer/value, recomputing locally if needed."""
@@ -377,7 +391,6 @@ class Checksum:
             try:
                 from seamless.checksum.expression import (
                     evaluate_expression_async,
-                    get_expression_cache,
                 )
 
                 input_checksum = Checksum(expression["checksum"])
@@ -388,18 +401,12 @@ class Checksum:
                     await input_checksum.fingertip()
                 except CacheMissError:
                     pass
-                cache_key = (
-                    input_checksum.hex(),
-                    path,
-                    source_celltype,
-                    celltype,
-                )
-                get_expression_cache().pop(cache_key, None)
                 result = await evaluate_expression_async(
                     input_checksum,
                     path,
                     source_celltype,
                     celltype,
+                    materialize=True,
                 )
                 if Checksum(result) != self:
                     continue

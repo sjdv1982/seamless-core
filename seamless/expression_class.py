@@ -241,15 +241,19 @@ class Expression:
                 return asyncio.run(
                     self._evaluate_internal_async(execution=execution, scratch=scratch)
                 )
-        from .checksum.expression import get_expression_cache
+        from .checksum.expression import _has_local_buffer, get_expression_cache
 
         cached = get_expression_cache().get(
             (input_checksum.hex(), self.path, self.input_celltype, self.celltype)
         )
+        # A non-scratch local evaluation must leave the buffer here; a cached
+        # checksum without it is not an answer (materialize below).
+        materialize = not scratch and execution == "local"
         if (
             cached is not None
             and self.validator is None
             and self.validator_language is None
+            and not (materialize and not _has_local_buffer(cached))
         ):
             return self._publish_result(cached)
         location = execution
@@ -270,6 +274,7 @@ class Expression:
             self.celltype,
             validator=self.validator,
             validator_language=self.validator_language,
+            materialize=not scratch,
         )
         return self._publish_result(result)
 
@@ -305,6 +310,7 @@ class Expression:
                 validator=self.validator,
                 validator_language=self.validator_language,
                 member_id=id(self),
+                materialize=not scratch,
             )
         else:
             result = await evaluate_expression_remote(
@@ -335,7 +341,7 @@ class Expression:
         if result is None:
             return None
         checksum = Checksum(result)
-        checksum.tempref(scratch=True)
+        checksum.tempref()
         old = self._result_checksum
         if old is not None and old == checksum:
             if self._refhold_result and not self._result_refheld:
@@ -469,6 +475,20 @@ class Expression:
     def compute(self, *, execution: str = "auto") -> Checksum | None:
         self._enable_result_holding()
         return self._evaluate_internal(execution=execution)
+
+    def _compute_for_owner(self, *, scratch: bool) -> Checksum | None:
+        """``compute()`` on behalf of an owner (a Cell) with its own scratch policy.
+
+        A bare Expression asking for a checksum is always scratch; an owner's
+        request carries the owner's policy, so a non-scratch Cell's dispatched
+        Expression is materialized and written by the executing side.
+        """
+        self._enable_result_holding()
+        return self._evaluate_internal(scratch=scratch)
+
+    async def _compute_for_owner_async(self, *, scratch: bool) -> Checksum | None:
+        self._enable_result_holding()
+        return await self._evaluate_internal_async(scratch=scratch)
 
     def run(self, *, execution: str = "auto") -> Any:
         from .checksum.expression import resolve_expression_value

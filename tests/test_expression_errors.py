@@ -56,7 +56,14 @@ def hashserver(monkeypatch):
         content = buffers.get(Checksum(checksum))
         return None if content is None else Buffer(content, checksum=Checksum(checksum))
 
+    async def get_buffer_lengths(checksums):
+        return [
+            None if buffers.get(Checksum(c)) is None else len(buffers[Checksum(c)])
+            for c in checksums
+        ]
+
     buffer_remote.get_buffer = get_buffer
+    buffer_remote.get_buffer_lengths = get_buffer_lengths
     seamless_remote.buffer_remote = buffer_remote
     monkeypatch.setitem(sys.modules, "seamless_remote", seamless_remote)
     monkeypatch.setitem(sys.modules, "seamless_remote.buffer_remote", buffer_remote)

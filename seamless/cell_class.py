@@ -311,7 +311,8 @@ class CellBase:
     def _set_result_checksum(self, result):
         old = getattr(self, "_standalone_result_checksum", None)
         if result is not None:
-            result.incref_refholder()
+            # The Cell owns its result, so its scratch policy decides.
+            result.incref_refholder(scratch=getattr(self, "_scratch", False))
         self._standalone_result_checksum = result
         if result is None:
             self._standalone_expression = None
@@ -362,7 +363,9 @@ class CellBase:
             return None
         try:
             self._standalone_expression = self.build(input_ref)
-            result = self._standalone_expression.compute()
+            result = self._standalone_expression._compute_for_owner(
+                scratch=getattr(self, "_scratch", False)
+            )
         except Exception as exc:
             from .error_envelope import execution_error
             self._standalone_exception = execution_error(exc)
@@ -396,7 +399,9 @@ class CellBase:
             return None
         try:
             self._standalone_expression = self.build(input_ref)
-            result = await self._standalone_expression.compute_async()
+            result = await self._standalone_expression._compute_for_owner_async(
+                scratch=getattr(self, "_scratch", False)
+            )
         except Exception as exc:
             from .error_envelope import execution_error
             self._standalone_exception = execution_error(exc)
@@ -471,7 +476,7 @@ class Cell(CellBase):
     declaration. Retyping changes the output conversion, not the stored input.
     """
 
-    __slots__ = ("_path", "_validator", "_validator_language")
+    __slots__ = ("_path", "_validator", "_validator_language", "_scratch")
 
     def __init__(
         self, celltype: str | None = None, *, checksum: Any = _UNSET,
@@ -497,6 +502,7 @@ class Cell(CellBase):
         celltype = celltype if celltype is not None else declared or "mixed"
         Buffer._map_celltype(celltype)
         self._workflow_backend = None
+        self._scratch = False
         self._input_ref = ref
         self._path = ""
         _check_projected_source(ref, celltype)
@@ -525,6 +531,7 @@ class Cell(CellBase):
         object.__setattr__(self, "_celltype", "mixed")
         object.__setattr__(self, "_validator", None)
         object.__setattr__(self, "_validator_language", None)
+        object.__setattr__(self, "_scratch", False)
         object.__setattr__(self, "_standalone_exception", None)
         object.__setattr__(self, "_standalone_result_checksum", None)
         object.__setattr__(self, "_refholds_released", True)
@@ -579,6 +586,28 @@ class Cell(CellBase):
         self._standalone_exception = None
         self._set_result_checksum(None)
 
+    @property
+    def scratch(self) -> bool:
+        """Whether this Cell's result buffer is kept out of the hashserver.
+
+        A non-scratch Cell (the default) owns its result for keeps: its
+        requests are non-scratch, so a dispatched Expression is materialized
+        and written, and its hold publishes. A scratch Cell's result stays in
+        memory only; ``.value`` may then miss and ``fingertip()`` recovers it.
+        """
+        if self._workflow_backend is not None:
+            return self._workflow_backend.scratch
+        return getattr(self, "_scratch", False)
+
+    @scratch.setter
+    def scratch(self, scratch: bool) -> None:
+        if self._workflow_backend is not None:
+            self._workflow_backend.scratch = scratch
+            return
+        self._scratch = bool(scratch)
+        # Re-acquire the held result under the new policy.
+        self._set_result_checksum(self._standalone_result_checksum)
+
 
 
 
@@ -628,6 +657,7 @@ class Cell(CellBase):
                      input_celltype=self.input_celltype if ref is self._input_ref else None,
                      validator=self.validator, validator_language=self.validator_language)
         clone._path = self._path
+        clone._scratch = getattr(self, "_scratch", False)
         for name, value in updates.items():
             setattr(clone, name, value)
         return clone
