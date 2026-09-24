@@ -409,7 +409,13 @@ def from_buffer(
     raw = _as_bytes(buffer)
     length = _length_bucket(len(raw))
     if raw.startswith(_magic_numpy()):
-        dtype, rank, flags = _numpy_type(raw)
+        try:
+            dtype, rank, flags = _numpy_type(raw)
+        except (EOFError, ValueError):
+            # A magic prefix alone does not make arbitrary bytes a valid NPY
+            # buffer. Keep malformed payloads classifiable as raw storage;
+            # callers that need a binary value still validate them by parsing.
+            return HashType(Kind.RAW_BYTES, length)
         return HashType(Kind.NUMPY, length, dtype, rank, flags)
     if raw.startswith(_magic_seamless_mixed()):
         return HashType(_mixed_kind(raw), length)

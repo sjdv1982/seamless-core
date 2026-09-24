@@ -417,12 +417,6 @@ def test_bytes_to_binary_rejects_a_coincidental_npy_magic():
     assert calls == [None]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §Celltypes/§Reformat rules (bytes->binary): bytes is raw storage, "
-    "but checksum calculation raises ValueError for a buffer that starts with the "
-    ".npy magic and is not a valid .npy (HashType.from_buffer parses it)",
-)
 def test_raw_bytes_with_coincidental_npy_magic_have_a_checksum():
     raw = MAGIC_NUMPY + b"garbage"
     buffer = Buffer(raw)
@@ -479,30 +473,8 @@ def test_get_buffer_is_called_at_most_once_and_dry_run_agrees(source):
             )
 
 
-# Chains whose first step writes a new buffer and whose last step keeps the
-# checksum return (new_checksum, None): the intermediate buffer is dropped.
-_CHAIN_DROPS_BUFFER = {
-    ("binary", "str"),
-    ("binary", "text"),
-    ("mixed", "ipython"),
-    ("mixed", "python"),
-    ("mixed", "yaml"),
-    ("plain", "ipython"),
-    ("plain", "python"),
-}
 _RESULT_PAIRS = [
-    pytest.param(
-        source,
-        target,
-        marks=pytest.mark.xfail(
-            strict=False,
-            reason=f"{DOC} §Executor, Return value: a chain whose last step keeps "
-            "the checksum drops the intermediate buffer and returns "
-            "(new_checksum, None)",
-        ),
-    )
-    if (source, target) in _CHAIN_DROPS_BUFFER
-    else (source, target)
+    (source, target)
     for source in SAMPLED
     for target in celltypes
     if source != target
@@ -529,11 +501,6 @@ def test_new_checksum_comes_with_its_buffer_and_reads_as_target(source, target):
             _parse_buffer(result_buffer, result_checksum, target)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §Resolving an indirection: after a chain step that dropped its "
-    "buffer, the next step is fed the ORIGINAL source buffer (binary .npy) and fails",
-)
 @pytest.mark.parametrize("target", ["python", "ipython", "yaml"])
 def test_binary_array_converts_through_plain_and_text(target):
     """binary->python/ipython/yaml resolve via plain and text; [1, 2] is valid in all."""
