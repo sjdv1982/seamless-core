@@ -245,7 +245,6 @@ def close(*, from_atexit: bool = False) -> None:
 
     _closing = True
     _closed = True
-    _mark_module_closed()
     _debug(f"close(from_atexit={from_atexit}) start")
     _run_close_hooks()
     failures: List[str] = []
@@ -337,6 +336,7 @@ def close(*, from_atexit: bool = False) -> None:
         # Phase 2: buffer flush attempts
         _debug("flushing pending buffers (short/long)")
         pending_buffers = _flush_buffers_short_then_long(failures)
+        _mark_module_closed()
 
         # Release explicit lifecycle ownership while buffers are still available
         # to the existing writer flush, then allow finalizers to settle.
@@ -390,6 +390,7 @@ def close(*, from_atexit: bool = False) -> None:
         _stop_resource_tracker(failures)
 
     finally:
+        _mark_module_closed()
         summary_parts: List[str] = []
         debug = bool(os.environ.get("SEAMLESS_DEBUG_TRANSFORMATION"))
         write_clients = False

@@ -468,7 +468,7 @@ class Expression:
 
     def compute(self, *, execution: str = "auto") -> Checksum | None:
         self._enable_result_holding()
-        return self._evaluate_internal(execution=execution)
+        return self._evaluate_internal(execution=execution, scratch=False)
 
     def run(self, *, execution: str = "auto") -> Any:
         from .checksum.expression import resolve_expression_value

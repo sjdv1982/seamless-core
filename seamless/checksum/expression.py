@@ -493,12 +493,13 @@ async def _execute_remote_expression(
             from seamless_remote import daskserver_remote
 
             dispatch = daskserver_remote.run_expression
+        kwargs = {"scratch": True} if active.scratch else {}
         result = await dispatch(
             key.input_checksum,
             key.path,
             key.input_celltype,
             key.celltype,
-            scratch=active.scratch,
+            **kwargs,
         )
         result = Checksum(result)
         _expression_cache[cache_key] = result
