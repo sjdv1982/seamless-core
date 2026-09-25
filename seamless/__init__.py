@@ -72,7 +72,12 @@ from .checksum_class import Checksum as _Checksum
 from .buffer_class import Buffer as _Buffer
 from .expression_class import Expression as _Expression
 from .cell_class import Cell as _Cell, CellBase
-from .cell_errors import BoundStateError, ProjectionError, AuthorityError
+from .cell_errors import (
+    BoundStateError,
+    ProjectionError,
+    AuthorityError,
+    ValueUnavailableError,
+)
 from .shutdown import close
 
 # Expose classes under the top-level module so their repr shows seamless.<Class>
@@ -92,6 +97,7 @@ __all__ = [
     "Cell",
     "CellBase",
     "AuthorityError",
+    "ValueUnavailableError",
     "BoundStateError",
     "ProjectionError",
     "CacheMissError",
