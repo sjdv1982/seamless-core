@@ -456,11 +456,10 @@ def test_folder_to_mixed_uses_one_dimensional_s1_arrays_for_every_child():
     assert value["nul"].tobytes() == b"ab\x00\x00"
 
 
-def test_expression_cancel_is_a_softcancel_alias():
+def test_expression_softcancel_is_available_and_module_cancel_is_gone():
     expression = Expression(
         Checksum(bytes.fromhex("cd" * 32)), input_celltype="plain"
     )
 
     assert expression.softcancel() is False
-    assert expression.cancel() is False
     assert not hasattr(expression_module, "cancel_expression")

@@ -145,12 +145,6 @@ def test_unresolved_source_identity_is_the_object_and_has_no_database_key():
         first.database_key
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="expressions.md, Identity: an Expression over an unresolved source is "
-    "identical only to itself; an empty Cell builds to a dummy over None, the dummy "
-    "collapses, and every such Expression keys on id(None) and compares equal",
-)
 def test_expressions_over_two_unresolved_sources_are_distinct():
     first = Expression(Cell("plain"), path="a", input_celltype="plain")
     second = Expression(Cell("plain"), path="a", input_celltype="plain")
@@ -287,11 +281,6 @@ def test_free_expression_never_enters_a_waiting_set(monkeypatch):
     assert dummy.softcancel() is False
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="expressions.md, Cancellation > API: Expression.cancel is retired and "
-    "must raise pointing at softcancel(); code keeps it as a softcancel alias",
-)
 def test_expression_cancel_is_retired():
     expression = Expression(_ANY, input_celltype="plain")
     with pytest.raises(Exception) as info:

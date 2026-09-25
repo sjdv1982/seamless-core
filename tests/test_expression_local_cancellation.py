@@ -9,10 +9,7 @@ from seamless.checksum import expression as expression_mod
 
 
 def _softcancel(expression):
-    method = getattr(type(expression), "softcancel", None)
-    if method is not None:
-        return method(expression)
-    return expression.cancel()
+    return expression.softcancel()
 
 
 def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monkeypatch):
