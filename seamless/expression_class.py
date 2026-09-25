@@ -110,10 +110,15 @@ class Expression:
         celltype = self.input_celltype if self.celltype is None else self.celltype
         from .checksum.expression import validate_expression_shape
 
-        # A dummy source contributes no operation, including at a deep root.
-        if (isinstance(ref, Expression) and not ref.path
-                and ref.input_celltype == ref.celltype
-                and ref.validator is None and ref.validator_language is None):
+        # Keep unresolved dummy Expressions so each source retains its identity.
+        if (
+            isinstance(ref, Expression)
+            and ref.input_checksum is not None
+            and not ref.path
+            and ref.input_celltype == ref.celltype
+            and ref.validator is None
+            and ref.validator_language is None
+        ):
             ref = ref._input_ref
         from .checksum.null import is_null
         if not path and isinstance(ref, Checksum) and is_null(ref):
@@ -399,8 +404,13 @@ class Expression:
 
     @property
     def identity_key(self) -> tuple[Any, str, str, str]:
+        input_ref_key = (
+            ("object", id(self))
+            if self._input_ref is None
+            else _input_ref_key(self._input_ref)
+        )
         return (
-            _input_ref_key(self._input_ref),
+            input_ref_key,
             self.path,
             self.input_celltype,
             self.celltype,
@@ -514,8 +524,11 @@ class Expression:
         )
 
     def cancel(self) -> bool:
-        """Stop this Expression from waiting without interrupting shared work."""
-        return self.softcancel()
+        """Reject the retired hard-cancel API; use :meth:`softcancel` instead."""
+        raise NotImplementedError(
+            "Expression.cancel() is retired; use softcancel(). "
+            "Expressions have no hard cancel."
+        )
 
 __all__ = [
     "Expression",
