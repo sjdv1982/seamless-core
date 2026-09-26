@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .cell_errors import ProjectionError
+from .cell_errors import AuthorityError, ProjectionError, ValueUnavailableError
 from .retired_names import check_retired_name
 from .expression_class import (
     Expression,
@@ -13,6 +13,7 @@ from .expression_class import (
 )
 
 _UNSET = object()
+_NO_PROJECTION = object()
 
 
 class CellBase:
@@ -282,12 +283,16 @@ class CellBase:
             )
         if self._workflow_backend is not None:
             return self._workflow_backend.write_value(value, detach=detach)
+        if isinstance(self, Cell) and self._standalone_write_handle:
+            return self._standalone_write_value(value)
         self._check_write_authority(detach)
         self._replace_input_ref(_serialize_value(value, self.celltype), input_celltype=self.celltype)
 
     def _write_checksum(self, checksum, *, input_celltype=None, detach=False):
         if self._workflow_backend is not None:
             return self._workflow_backend.write_checksum(checksum, input_celltype=input_celltype, detach=detach)
+        if isinstance(self, Cell) and self._standalone_write_handle:
+            return self._standalone_write_checksum(checksum, input_celltype=input_celltype)
         from .checksum_class import Checksum
         self._check_write_authority(detach)
         self._replace_input_ref(None if checksum is None else Checksum(checksum), input_celltype=input_celltype)
@@ -295,6 +300,8 @@ class CellBase:
     def _write_buffer(self, buffer, *, detach=False):
         if self._workflow_backend is not None:
             return self._workflow_backend.write_buffer(buffer, detach=detach)
+        if isinstance(self, Cell) and self._standalone_write_handle:
+            return self._standalone_write_buffer(buffer)
         self._check_write_authority(detach)
         checksum = _checksum_for_buffer(buffer, self.celltype)
         self._write_checksum(checksum, detach=detach)
@@ -476,7 +483,10 @@ class Cell(CellBase):
     declaration. Retyping changes the output conversion, not the stored input.
     """
 
-    __slots__ = ("_path", "_validator", "_validator_language", "_scratch")
+    __slots__ = (
+        "_path", "_path_component", "_conversion_link", "_validator",
+        "_validator_language", "_scratch",
+    )
 
     def __init__(
         self, celltype: str | None = None, *, checksum: Any = _UNSET,
@@ -505,6 +515,8 @@ class Cell(CellBase):
         self._scratch = False
         self._input_ref = ref
         self._path = ""
+        self._path_component = _NO_PROJECTION
+        self._conversion_link = False
         _check_projected_source(ref, celltype)
         self._celltype = celltype
         self._input_celltype = None if ref is None else declared or input_celltype or celltype
@@ -527,6 +539,8 @@ class Cell(CellBase):
         object.__setattr__(self, "_workflow_backend", backend)
         object.__setattr__(self, "_input_ref", None)
         object.__setattr__(self, "_path", "")
+        object.__setattr__(self, "_path_component", _NO_PROJECTION)
+        object.__setattr__(self, "_conversion_link", False)
         object.__setattr__(self, "_input_celltype", "mixed")
         object.__setattr__(self, "_celltype", "mixed")
         object.__setattr__(self, "_validator", None)
@@ -657,6 +671,8 @@ class Cell(CellBase):
                      input_celltype=self.input_celltype if ref is self._input_ref else None,
                      validator=self.validator, validator_language=self.validator_language)
         clone._path = self._path
+        clone._path_component = self._path_component
+        clone._conversion_link = self._conversion_link
         clone._scratch = getattr(self, "_scratch", False)
         for name, value in updates.items():
             setattr(clone, name, value)
@@ -667,6 +683,7 @@ class Cell(CellBase):
             return Cell._from_backend(self._workflow_backend.derive_item(key))
         child = Cell(source=self)
         child._path = append_item_path("", key)
+        child._path_component = key
         if self.celltype in ("deepcell", "deepfolder", "folder"):
             child._celltype = "mixed" if self.celltype == "deepcell" else "bytes"
         return child
@@ -676,6 +693,7 @@ class Cell(CellBase):
             return Cell._from_backend(self._workflow_backend.derive_slice(start, stop, step))
         child = Cell(source=self)
         child._path = append_slice_path("", start, stop, step)
+        child._path_component = slice(start, stop, step)
         return child
 
     def as_celltype(self, celltype: str) -> "Cell":
@@ -686,6 +704,7 @@ class Cell(CellBase):
         from .buffer_class import Buffer
         Buffer._map_celltype(celltype)
         child._celltype = celltype
+        child._conversion_link = True
         return child
 
     def with_input(self, input_ref: Any) -> "Cell":
@@ -693,6 +712,42 @@ class Cell(CellBase):
 
     def with_validator(self, validator: Any, *, language: str | None = None) -> "Cell":
         return self._derive(validator=validator, validator_language=language)
+
+    def __copy__(self):
+        if self._workflow_backend is not None:
+            return type(self)._from_backend(self._workflow_backend)
+        from .checksum_class import Checksum
+
+        ref = self._input_ref
+        kwargs = {
+            "celltype": self.celltype,
+            "validator": self.validator,
+            "validator_language": self.validator_language,
+        }
+        if ref is None or isinstance(ref, Checksum):
+            kwargs["checksum"] = ref
+        else:
+            kwargs["source"] = ref
+        if self.input_celltype is not None:
+            kwargs["input_celltype"] = self.input_celltype
+        duplicate = type(self)(**kwargs)
+        duplicate._path = self._path
+        duplicate._path_component = self._path_component
+        duplicate._conversion_link = self._conversion_link
+        duplicate._scratch = self._scratch
+        duplicate._standalone_exception = self._standalone_exception
+        duplicate._standalone_recipe_key = self._standalone_recipe_key
+        duplicate._standalone_expression = self._standalone_expression
+        if self._standalone_result_checksum is not None:
+            duplicate._set_result_checksum(self._standalone_result_checksum)
+        if self._refholds_released:
+            duplicate._release_refholds()
+        return duplicate
+
+    def __deepcopy__(self, memo):
+        duplicate = self.__copy__()
+        memo[id(self)] = duplicate
+        return duplicate
 
     def build(self, input_ref: Any = _UNSET) -> Expression:
         overridden = input_ref is not _UNSET
@@ -760,7 +815,10 @@ class Cell(CellBase):
             object.__setattr__(self, name, value)
             return
         if self._workflow_backend is None:
-            raise AttributeError(name)
+            if self._same_standalone_endpoint(value, (name,)):
+                return
+            self._standalone_write_value(value, extra_path=(name,))
+            return
         self._workflow_backend.assign(self.path_python, name, value)
 
     def __delattr__(self, name: str) -> None:
@@ -769,17 +827,22 @@ class Cell(CellBase):
             object.__delattr__(self, name)
             return
         if self._workflow_backend is None:
-            raise AttributeError(name)
+            self._standalone_delete(extra_path=(name,))
+            return
         self._workflow_backend.delete(self.path_python, name)
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if self._workflow_backend is None:
-            raise TypeError("Standalone Cell item assignment is not supported")
+            if self._same_standalone_endpoint(value, (key,)):
+                return
+            self._standalone_write_value(value, extra_path=(key,))
+            return
         self._workflow_backend.assign_item(self.path_python, key, value)
 
     def __delitem__(self, key: Any) -> None:
         if self._workflow_backend is None:
-            raise TypeError("Standalone Cell item deletion is not supported")
+            self._standalone_delete(extra_path=(key,))
+            return
         self._workflow_backend.delete_item(self.path_python, key)
 
     def __iadd__(self, value: Any) -> "Cell":
@@ -796,9 +859,135 @@ class Cell(CellBase):
 
     def _augmented(self, value: Any, operation: str) -> "Cell":
         if self._workflow_backend is None:
-            raise TypeError("Augmented Cell updates require a bound Cell")
+            target, path, conversion = self._standalone_write_info()
+            if conversion:
+                raise AuthorityError(
+                    "A converted Cell handle has no writable source; write to the source Cell"
+                )
+            target._check_write_authority(False)
+            import operator
+            current = self.value
+            updated = getattr(operator, operation)(current, value)
+            self._standalone_commit(target, path, updated)
+            return self
         self._workflow_backend.augmented(self.path_python, operation, value)
         return self
+
+    @property
+    def _standalone_write_handle(self) -> bool:
+        return (
+            self._path_component is not _NO_PROJECTION
+            or self._conversion_link
+        )
+
+    def _standalone_write_info(self, extra_path=()):
+        """Return the root, complete path, and conversion barrier for a handle."""
+
+        current = self
+        path = []
+        conversion = False
+        while current._path_component is not _NO_PROJECTION or current._conversion_link:
+            component = current._path_component
+            if component is not _NO_PROJECTION:
+                path.insert(0, component)
+            conversion = conversion or current._conversion_link
+            parent = current._input_ref
+            if not isinstance(parent, Cell) or parent._workflow_backend is not None:
+                break
+            current = parent
+        path.extend(extra_path)
+        return current, tuple(path), conversion
+
+    def _same_standalone_endpoint(self, value, extra_path=()):
+        if not isinstance(value, Cell) or value._workflow_backend is not None:
+            return False
+        target, path, conversion = self._standalone_write_info(extra_path)
+        other_target, other_path, other_conversion = value._standalone_write_info()
+        return (
+            not conversion and not other_conversion
+            and target is other_target and path == other_path
+        )
+
+    def _standalone_commit(self, target, path, value):
+        if not path:
+            target._write_value(value, detach=False)
+            return
+        root_value = target.value
+        if root_value is None:
+            if target._input_ref is None and all(isinstance(item, str) for item in path):
+                root_value = {}
+            else:
+                raise ValueUnavailableError(
+                    "Cannot write through a standalone projection without a root value"
+                )
+        bootstrap = target._input_ref is None
+        parent = root_value
+        for component in path[:-1]:
+            if bootstrap and isinstance(parent, dict) and isinstance(component, str) and component not in parent:
+                parent[component] = {}
+            parent = parent[component]
+        parent[path[-1]] = value
+        target._write_value(root_value, detach=False)
+
+    def _standalone_write_value(self, value, *, extra_path=()):
+        target, path, conversion = self._standalone_write_info(extra_path)
+        if conversion:
+            raise AuthorityError(
+                "A converted Cell handle has no writable source; write to the source Cell"
+            )
+        target._check_write_authority(False)
+        checksum = _serialize_value(value, self.celltype)
+        self._standalone_commit(target, path, checksum.resolve(self.celltype))
+
+    def _standalone_write_checksum(self, checksum, *, input_celltype=None):
+        target, path, conversion = self._standalone_write_info()
+        if conversion:
+            raise AuthorityError(
+                "A converted Cell handle has no writable source; write to the source Cell"
+            )
+        target._check_write_authority(False)
+        if checksum is None:
+            raise ValueError(
+                "A projection has no input to clear; use .value = None or del on the parent"
+            )
+        from .checksum_class import Checksum
+        value = Checksum(checksum).resolve(input_celltype or self.celltype)
+        self._standalone_commit(target, path, value)
+
+    def _standalone_write_buffer(self, buffer):
+        target, path, conversion = self._standalone_write_info()
+        if conversion:
+            raise AuthorityError(
+                "A converted Cell handle has no writable source; write to the source Cell"
+            )
+        target._check_write_authority(False)
+        if buffer is None:
+            raise ValueError(
+                "A projection has no input to clear; use .value = None or del on the parent"
+            )
+        checksum = _checksum_for_buffer(buffer, self.celltype)
+        value = checksum.resolve(self.celltype)
+        self._standalone_commit(target, path, value)
+
+    def _standalone_delete(self, *, extra_path=()):
+        target, path, conversion = self._standalone_write_info(extra_path)
+        if conversion:
+            raise AuthorityError(
+                "A converted Cell handle has no writable source; write to the source Cell"
+            )
+        target._check_write_authority(False)
+        if not path:
+            raise ValueError("A standalone Cell root cannot be deleted")
+        root_value = target.value
+        if root_value is None:
+            raise ValueUnavailableError(
+                "Cannot delete through a standalone projection without a root value"
+            )
+        parent = root_value
+        for component in path[:-1]:
+            parent = parent[component]
+        del parent[path[-1]]
+        target._write_value(root_value, detach=False)
 
 
     def __repr__(self) -> str:

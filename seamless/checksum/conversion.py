@@ -91,7 +91,7 @@ conversion_reformat = set(
         #  - Seamless-mixed buffer format (MAGIC_SEAMLESS_MIXED string) is also trivial.
         #  - If buffer is text, value stays the same (text-to-str)
         #
-        ("binary", "bytes"),  # for np.dtype(S..), get value.tobytes(); else trivial
+        ("binary", "bytes"),  # for np.dtype(S..), any shape, get value.tobytes(); else trivial
         #
         (
             "mixed",

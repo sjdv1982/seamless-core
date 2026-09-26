@@ -19,7 +19,13 @@ class ProjectionError(TypeError, AttributeError):
     """
 
 
-__all__ = ["BoundStateError", "ProjectionError", "WorkflowError", "AuthorityError"]
+__all__ = [
+    "BoundStateError",
+    "ProjectionError",
+    "WorkflowError",
+    "AuthorityError",
+    "ValueUnavailableError",
+]
 
 
 class WorkflowError(Exception):
@@ -28,3 +34,7 @@ class WorkflowError(Exception):
 
 class AuthorityError(WorkflowError):
     """A local write would be overwritten by an upstream source."""
+
+
+class ValueUnavailableError(WorkflowError):
+    """Raised when a value update cannot materialize its current root value."""
