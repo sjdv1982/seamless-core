@@ -163,9 +163,40 @@ class Expression:
         from .reference_lifecycle import register_refholder
 
         if self.input_checksum is not None:
-            self.input_checksum.incref_refholder(scratch=True)
-            object.__setattr__(self, "_input_refheld", self.input_checksum)
+            # An Expression keeps its input available only through a bounded
+            # tempref.  Inputs are dependencies, not owned results.
+            self.input_checksum.tempref()
         register_refholder(self)
+
+    def __copy__(self):
+        duplicate = type(self)(
+            self._input_ref,
+            path=self.path,
+            input_celltype=self.input_celltype,
+            celltype=self.celltype,
+            validator=self.validator,
+            validator_language=self.validator_language,
+        )
+        result = self._result_checksum
+        if result is not None:
+            result.tempref()
+            object.__setattr__(duplicate, "_result_checksum", result)
+        object.__setattr__(duplicate, "_refhold_result", self._refhold_result)
+        if (
+            result is not None
+            and self._refhold_result
+            and not self._refholds_released
+        ):
+            result.incref_refholder(scratch=None)
+            object.__setattr__(duplicate, "_result_refheld", True)
+        if self._refholds_released:
+            duplicate._release_refholds()
+        return duplicate
+
+    def __deepcopy__(self, memo):
+        duplicate = self.__copy__()
+        memo[id(self)] = duplicate
+        return duplicate
 
     @property
     def source(self):
@@ -337,7 +368,7 @@ class Expression:
         if not self._refhold_result:
             object.__setattr__(self, "_refhold_result", True)
         if self._result_checksum is not None and not self._result_refheld:
-            self._result_checksum.incref_refholder(scratch=True)
+            self._result_checksum.incref_refholder(scratch=None)
             object.__setattr__(self, "_result_refheld", True)
 
     def _publish_result(self, result: Checksum | str | bytes | None) -> Checksum | None:
@@ -350,14 +381,14 @@ class Expression:
         old = self._result_checksum
         if old is not None and old == checksum:
             if self._refhold_result and not self._result_refheld:
-                checksum.incref_refholder(scratch=True)
+                checksum.incref_refholder(scratch=None)
                 object.__setattr__(self, "_result_refheld", True)
             return checksum
 
         old_refheld = self._result_refheld
         new_refheld = self._refhold_result and not self._refholds_released
         if new_refheld:
-            checksum.incref_refholder(scratch=True)
+            checksum.incref_refholder(scratch=None)
         object.__setattr__(self, "_result_checksum", checksum)
         object.__setattr__(self, "_result_refheld", new_refheld)
         if old is not None and old_refheld:

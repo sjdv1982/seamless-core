@@ -313,10 +313,11 @@ def _binary_to_bytes(
     checksum: Checksum, get_buffer: Callable[[], Buffer]
 ) -> tuple[Checksum, Buffer | None]:
     # The concrete array, rather than only its cached type, determines whether
-    # it is the exceptional zero-dimensional dtype-S representation.
+    # it is a dtype-S array (any shape), which becomes its raw bytes.
+    # Serializing as "bytes" maps an empty array to the canonical null.
     value = _value_of(checksum, "binary", get_buffer)
-    if getattr(value, "ndim", None) == 0 and getattr(value.dtype, "kind", None) == "S":
-        return _buffer_result(Buffer(value.tobytes()))
+    if getattr(getattr(value, "dtype", None), "kind", None) == "S":
+        return _buffer_result(Buffer(value.tobytes(), "bytes"))
     return checksum, None
 
 
