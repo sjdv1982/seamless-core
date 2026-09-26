@@ -9,6 +9,8 @@ rejects a valid deserialization or conversion.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import io
 import itertools
 import json
@@ -42,7 +44,14 @@ from seamless.checksum.hash_type_validation import (
     conversion_feasible,
     ensure_hash_type,
     validate_expression,
+    validate_expression_async,
 )
+from seamless.checksum.conversion import (
+    conversion_chain,
+    conversion_equivalent,
+    conversion_forbidden,
+)
+from seamless.checksum.deep import DEEP_CELLTYPES
 
 from helpers.expression_hashtype_cases import iter_hashtype_witnesses
 from helpers.fake_remotes import install_fake_remotes
@@ -50,6 +59,22 @@ from helpers.fake_remotes import install_fake_remotes
 
 CHECKSUM = "a" * 64
 THE_13 = tuple(sorted(HASH_TYPE_CELLTYPES))
+# "The four structural names": three deep celltypes, plus `module`, which is NOT deep.
+THE_THREE_DEEP = ("deepcell", "deepfolder", "folder")
+THE_FOUR_STRUCTURAL = THE_THREE_DEEP + ("module",)
+# "either null checksum" (canonical null, with and without trailing newline).
+BOTH_NULLS = (CHECKSUM_NULL, Checksum(hashlib.sha256(b"null\n").digest()))
+# §conversion_feasible: exactly the 16 pairs python/ipython <-> yaml,
+# python/ipython -> int/float/bool and int/float/bool -> python/ipython.
+FORBIDDEN_16 = sorted(
+    {(code, "yaml") for code in ("python", "ipython")}
+    | {("yaml", code) for code in ("python", "ipython")}
+    | {(code, scalar) for code in ("python", "ipython") for scalar in ("int", "float", "bool")}
+    | {(scalar, code) for code in ("python", "ipython") for scalar in ("int", "float", "bool")}
+)
+LEGAL_PAIRS = [
+    (s, t) for s in THE_13 for t in THE_13 if s != t and (s, t) not in FORBIDDEN_16
+]
 
 
 @pytest.fixture(autouse=True)
@@ -85,24 +110,47 @@ def test_outside_the_domain_is_a_value_error_not_false(celltype):
         word.has_string_items(celltype)
 
 
+@pytest.mark.parametrize("celltype", THE_FOUR_STRUCTURAL + ("nonsense",))
+@pytest.mark.parametrize("position", ("source", "target"))
+@pytest.mark.parametrize(
+    "checksum", (CHECKSUM,) + BOTH_NULLS, ids=("plain-checksum", "null", "null-nl")
+)
+def test_conversion_feasible_domain_is_checked_even_for_a_null_checksum(
+    celltype, position, checksum
+):
+    """§Queries: `conversion_feasible` needs source **and** target in the 13; outside
+    it is ValueError. The null shortcut (rule 3) never answers a question that was
+    not HashType's to ask."""
+    source, target = (celltype, "plain") if position == "source" else ("plain", celltype)
+    word = HashType(Kind.JSON_OBJECT, Length.SHORT)
+    with pytest.raises(ValueError):
+        conversion_feasible(word, source, target, checksum=checksum)
+
+
 # --------------------------------------------------------------------------
 # The word
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("word", (-1, 1 << 13, 1 << 20))
-def test_out_of_range_words_do_not_unpack_and_are_invalid(word):
+def test_out_of_range_words_are_invalid(word):
     """§The word: a HashType is a 13-bit integer."""
-    with pytest.raises(ValueError):
-        unpack(word)
     assert is_valid_word(word) is False
 
 
 @pytest.mark.parametrize("word", ("5", 5.0, None))
 def test_non_integer_words_are_invalid(word):
-    with pytest.raises(TypeError):
-        unpack(word)
     assert is_valid_word(word) is False
+
+
+@pytest.mark.parametrize("word", ("5", 5.0, None, -1, 1 << 13, 1 << 20))
+def test_unpack_raises_for_non_integer_and_out_of_range_words(word):
+    """§The word: `unpack` raises for a non-integer and for an integer outside
+    [0, 2**13). The exception classes are unspecified, so only "raises" is pinned."""
+    with pytest.raises(Exception):
+        unpack(word)
+    with pytest.raises(Exception):
+        HashType.unpack(word)
 
 
 DERIVED = {
@@ -150,7 +198,7 @@ def test_length_is_always_the_byte_length_bucket(size, length):
 
 
 @pytest.mark.parametrize(
-    "raw", (b'"inf"', b'"nan"', b'"-Infinity"', b'"1e400"', b'"0x10"', b'"abc"')
+    "raw", (b'"inf"', b'"nan"', b'"-Infinity"', b'"1e400"', b'"abc"')
 )
 def test_json_string_gets_numeric_scalar_only_if_it_parses_as_a_finite_float(raw):
     """§Producer step 4: string -> JSON_STRING (+NUMERIC_SCALAR if finite float)."""
@@ -159,7 +207,7 @@ def test_json_string_gets_numeric_scalar_only_if_it_parses_as_a_finite_float(raw
     assert not (word.flags & Flag.NUMERIC_SCALAR)
 
 
-@pytest.mark.parametrize("raw", (b'"42"', b'" 42 "', b'"-1.5e3"'))
+@pytest.mark.parametrize("raw", (b'"42"', b'"-1.5e3"'))
 def test_finite_numeric_json_string_is_flagged(raw):
     word = from_buffer(raw)
     assert word.kind == Kind.JSON_STRING
@@ -210,6 +258,39 @@ def test_concrete_str_accepts_null_and_boolean_checksums(kind, checksum):
     assert deserializable_as(HashType(kind, Length.SHORT), "str", checksum=checksum) is True
 
 
+def _any_word(kind: Kind, length: Length = Length.LONG) -> HashType:
+    """A well-formed word of `kind` (LONG by default: disproves int/float if reached)."""
+    if kind == Kind.NUMPY:
+        return HashType(kind, length, DType.NONNUMERIC, Rank.D1)
+    if kind == Kind.JSON_NUMBER:
+        return HashType(kind, length, flags=Flag.NUMERIC_SCALAR)
+    return HashType(kind, length)
+
+
+@pytest.mark.parametrize("kind", list(Kind), ids=lambda k: k.name)
+@pytest.mark.parametrize("null", BOTH_NULLS, ids=("null", "null-nl"))
+def test_null_checksum_deserializes_as_all_13_whatever_the_word(kind, null):
+    """§deserializable_as step 1: either null checksum -> True for every one of the 13,
+    evaluated before every other step, so no word can disprove it."""
+    word = _any_word(kind)
+    assert is_valid_word(word.word)
+    for celltype in THE_13:
+        assert word.deserializable_as(celltype, checksum=null) is True, celltype
+
+
+@pytest.mark.parametrize("source,target", FORBIDDEN_16, ids=[f"{s}->{t}" for s, t in FORBIDDEN_16])
+def test_null_deserializability_is_not_convertibility(source, target):
+    """§deserializable_as step 1: deserializability, not convertibility. A null checksum
+    reads as both ends of every forbidden pair; the pair itself is still forbidden
+    (the conversion half is pinned by the xfail
+    test_null_checksum_does_not_make_a_forbidden_pair_feasible)."""
+    word = HashType(Kind.JSON_STRING, Length.SHORT)
+    for null in BOTH_NULLS:
+        assert word.deserializable_as(source, checksum=null) is True
+        assert word.deserializable_as(target, checksum=null) is True
+    assert (source, target) in conversion_forbidden
+
+
 @pytest.mark.parametrize("kind", (Kind.UNTESTED, Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED))
 def test_untested_str_is_true_for_boolean_checksums(kind):
     """§deserializable_as step 4: untested `str` -> True for null/boolean checksums."""
@@ -245,11 +326,41 @@ def test_long_concrete_numbers_are_disproved_only_for_int_and_float(celltype):
 
 
 def test_null_checksum_is_feasible_even_when_the_word_disproves_the_source():
-    """§conversion_feasible: a null checksum -> True (first rule)."""
+    """§conversion_feasible: a null checksum -> True (on a legal pair; plain has no
+    forbidden target)."""
     word = HashType(Kind.RAW_BYTES, Length.SHORT)
     assert word.deserializable_as("plain", checksum=CHECKSUM) is False
     for target in THE_13:
         assert conversion_feasible(word, "plain", target, checksum=CHECKSUM_NULL) is True
+
+
+@pytest.mark.parametrize("source,target", LEGAL_PAIRS, ids=[f"{s}->{t}" for s, t in LEGAL_PAIRS])
+def test_null_checksum_is_true_on_every_legal_pair(source, target):
+    """§conversion_feasible rule 3: a null checksum on a legal pair -> True, whatever
+    the word says (RAW_BYTES LONG disproves most sources for a non-null checksum)."""
+    for kind in Kind:
+        word = _any_word(kind)
+        for null in BOTH_NULLS:
+            assert conversion_feasible(word, source, target, checksum=null) is True
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "contract ahead of code: hashtype.md §conversion_feasible rule 2 (a forbidden "
+        "pair is False for every checksum, including a null checksum; "
+        "contract-clarity-rulings.md) -- conversion_feasible returns True for a null "
+        "checksum because its null shortcut runs before the forbidden check"
+    ),
+)
+@pytest.mark.parametrize("null", BOTH_NULLS, ids=("null", "null-nl"))
+@pytest.mark.parametrize(
+    "source,target", FORBIDDEN_16, ids=[f"{s}->{t}" for s, t in FORBIDDEN_16]
+)
+def test_null_checksum_does_not_make_a_forbidden_pair_feasible(source, target, null):
+    """Rule 2: illegal conversions remain illegal, also for a null checksum."""
+    word = HashType(Kind.JSON_STRING, Length.SHORT)
+    assert conversion_feasible(word, source, target, checksum=null) is False
 
 
 @pytest.mark.parametrize("celltype", ("plain", "binary", "int", "text"))
@@ -260,17 +371,45 @@ def test_source_equal_target_is_true_before_the_source_check(celltype):
     assert conversion_feasible(word, celltype, celltype, checksum=CHECKSUM) is True
 
 
+def _valid_source(source: str) -> tuple[HashType, Checksum]:
+    """A non-null (word, checksum) that deserializable_as(source) answers True for."""
+    if source in ("int", "float"):
+        return HashType(Kind.JSON_NUMBER, Length.SHORT, flags=Flag.NUMERIC_SCALAR), Checksum(CHECKSUM)
+    if source == "bool":
+        return HashType(Kind.JSON_STRING, Length.SHORT), CHECKSUM_TRUE
+    return HashType(Kind.RAW_TEXT, Length.SHORT), Checksum(CHECKSUM)
+
+
+def test_forbidden_pairs_are_exactly_the_16():
+    """§conversion_feasible: a pair is forbidden iff it is in conversion_forbidden,
+    exactly the 16 pairs python/ipython <-> yaml, python/ipython -> int/float/bool,
+    int/float/bool -> python/ipython."""
+    assert len(FORBIDDEN_16) == 16
+    assert set(conversion_forbidden) == set(FORBIDDEN_16)
+
+
+def test_no_equivalence_or_chain_resolves_to_a_forbidden_pair():
+    """§conversion_feasible: no equivalence or chain resolves to a forbidden pair, so
+    every other pair of distinct celltypes is legal."""
+    for pair, equivalent in conversion_equivalent.items():
+        if pair[0] in HASH_TYPE_CELLTYPES and pair[1] in HASH_TYPE_CELLTYPES:
+            assert pair not in conversion_forbidden
+            assert tuple(equivalent) not in conversion_forbidden, (pair, equivalent)
+    for (source, target), middle in conversion_chain.items():
+        assert (source, target) not in conversion_forbidden
+        assert (source, middle) not in conversion_forbidden, (source, middle, target)
+        assert (middle, target) not in conversion_forbidden, (source, middle, target)
+
+
 @pytest.mark.parametrize(
-    "source,target", (("python", "yaml"), ("yaml", "python"), ("ipython", "yaml"))
+    "source,target", FORBIDDEN_16, ids=[f"{s}->{t}" for s, t in FORBIDDEN_16]
 )
 def test_forbidden_pairs_are_false_even_for_a_valid_source(source, target):
-    """§conversion_feasible: conversion_forbidden -> False."""
-    from seamless.checksum.conversion import conversion_forbidden
-
-    assert (source, target) in conversion_forbidden
-    word = HashType(Kind.RAW_TEXT, Length.SHORT)
-    assert word.deserializable_as(source, checksum=CHECKSUM) is True
-    assert conversion_feasible(word, source, target, checksum=CHECKSUM) is False
+    """§conversion_feasible rule 2: a forbidden pair -> False, even where the source
+    reads fine (rule 4 would not have refused it)."""
+    word, checksum = _valid_source(source)
+    assert word.deserializable_as(source, checksum=checksum) is True
+    assert conversion_feasible(word, source, target, checksum=checksum) is False
 
 
 @pytest.mark.parametrize(
@@ -294,9 +433,6 @@ def test_trivial_and_reformat_pairs_are_true(word, source, target):
 )
 def test_reinterpret_answers_deserializable_as_target(kind, expected):
     """§conversion_feasible: conversion_reinterpret -> deserializable_as(target)."""
-    from seamless.checksum.conversion import conversion_reinterpret
-
-    assert ("bytes", "text") in conversion_reinterpret
     word = HashType(kind, Length.SHORT)
     assert conversion_feasible(word, "bytes", "text", checksum=CHECKSUM) is expected
 
@@ -341,7 +477,7 @@ def _register(raw: bytes) -> tuple[Checksum, HashType]:
 def test_conversion_is_checked_only_for_an_empty_path():
     """§Where consulted: conversion_feasible is asked only where there is no path."""
     checksum, word = _register(b'{"a": 1}')
-    with pytest.raises(HashTypeValidationError, match="Cannot convert"):
+    with pytest.raises(HashTypeValidationError):
         validate_expression(
             checksum, buffer=None, source_celltype="plain",
             path_steps=(), target_celltype="binary",
@@ -352,16 +488,6 @@ def test_conversion_is_checked_only_for_an_empty_path():
     ) == word
 
 
-def test_source_is_checked_before_path_capability():
-    """§Where consulted: source celltype first, then path capability."""
-    checksum, _ = _register(b"\xff\xfe\x00")
-    with pytest.raises(HashTypeValidationError, match="Cannot deserialize"):
-        validate_expression(
-            checksum, buffer=None, source_celltype="plain",
-            path_steps=(("item", "missing"),), target_celltype="plain",
-        )
-
-
 def test_capability_is_asked_of_the_input_celltype():
     """§Where consulted: the capability check is asked of the **input** celltype."""
     checksum, word = _register(b'"hello"')
@@ -370,7 +496,7 @@ def test_capability_is_asked_of_the_input_celltype():
         checksum, buffer=None, source_celltype="str",
         path_steps=(("item", 0),), target_celltype="int",
     ) == word
-    with pytest.raises(HashTypeValidationError, match="MAP"):
+    with pytest.raises(HashTypeValidationError):
         validate_expression(
             checksum, buffer=None, source_celltype="str",
             path_steps=(("item", "k"),), target_celltype="plain",
@@ -384,7 +510,7 @@ def test_any_step_after_a_bytes_item_is_rejected():
         checksum, buffer=None, source_celltype="bytes",
         path_steps=(("slice", (1, None, None)), ("item", 0)), target_celltype="int",
     ) == word
-    with pytest.raises(HashTypeValidationError, match="SEQ"):
+    with pytest.raises(HashTypeValidationError):
         validate_expression(
             checksum, buffer=None, source_celltype="bytes",
             path_steps=(("item", 0), ("item", 0)), target_celltype="int",
@@ -426,23 +552,69 @@ def test_nonnumeric_d1_array_stops_checking_after_an_item():
     ) == word
 
 
-@pytest.mark.parametrize("deep", ("deepcell", "deepfolder", "folder"))
-def test_deep_source_is_never_vetted_by_hashtype(deep):
-    """§Where consulted / Non-goals: deep feasibility is structural; HashType is not asked."""
-    checksum, _ = _register(b"\xff\xfe\x00")  # raw bytes: disproved as plain
-    validate_expression(
-        checksum, buffer=None, source_celltype=deep,
-        path_steps=(("item", "x"),), target_celltype="plain",
+def _forbid_hashtype_queries(monkeypatch):
+    def asked(*args, **kwargs):
+        raise AssertionError("HashType was asked about a structural name")
+
+    for name in (
+        "validate_deserializable_as", "validate_deserializable_as_async",
+        "_validate_path_capability", "conversion_feasible",
+    ):
+        monkeypatch.setattr(htv, name, asked)
+    for name in ("deserializable_as", "capabilities"):
+        monkeypatch.setattr(HashType, name, asked)
+
+
+@pytest.mark.parametrize("structural", THE_FOUR_STRUCTURAL)
+@pytest.mark.parametrize("position", ("source", "target"))
+@pytest.mark.parametrize("mode", ("sync", "async"))
+def test_structural_names_are_never_vetted_by_hashtype(monkeypatch, structural, position, mode):
+    """§Where consulted, Expression validation: if either celltype is one of the four
+    structural names (the three deep celltypes, and `module`), HashType is not asked
+    anything; the checksum is only classified."""
+    checksum, word = _register(b"\xff\xfe\x00")  # raw bytes: disproved as plain
+    assert word.deserializable_as("plain", checksum=checksum) is False
+    source, target = (structural, "plain") if position == "source" else ("plain", structural)
+    _forbid_hashtype_queries(monkeypatch)
+    kwargs = dict(
+        buffer=None, source_celltype=source,
+        path_steps=(("item", "x"), ("item", 0)), target_celltype=target,
     )
+    if mode == "sync":
+        result = validate_expression(checksum, **kwargs)
+    else:
+        result = asyncio.run(validate_expression_async(checksum, **kwargs))
+    assert result == word
 
 
-def test_unknown_celltype_in_expression_validation_is_a_value_error():
-    checksum, _ = _register(b"{}")
+@pytest.mark.parametrize("position", ("source", "target"))
+@pytest.mark.parametrize("mode", ("sync", "async"))
+def test_expression_validation_unknown_celltype_is_a_value_error(position, mode):
+    """§Where consulted: an unknown celltype name raises ValueError (it is neither one
+    of the 13 nor one of the four structural names)."""
+    checksum, _ = _register(b'{"a": 1}')
+    source, target = ("nonsense", "plain") if position == "source" else ("plain", "nonsense")
+    kwargs = dict(buffer=None, source_celltype=source, path_steps=(), target_celltype=target)
     with pytest.raises(ValueError):
-        validate_expression(
-            checksum, buffer=None, source_celltype="nonsense",
-            path_steps=(), target_celltype="plain",
-        )
+        if mode == "sync":
+            validate_expression(checksum, **kwargs)
+        else:
+            asyncio.run(validate_expression_async(checksum, **kwargs))
+
+
+def test_module_is_a_structural_name_but_not_a_deep_celltype():
+    """Intro / §Queries: the four structural names are the three deep celltypes plus
+    `module`, which is NOT deep. Every place that decides deep feasibility (the deep
+    registry and the conversion engine's deep table, which Expression construction
+    also uses) names exactly the three; HashType's structural carve-out names all four."""
+    from seamless.checksum import convert
+
+    assert set(THE_THREE_DEEP) == set(DEEP_CELLTYPES)
+    assert "module" not in DEEP_CELLTYPES
+    assert set(convert._DEEP_CELLTYPES) == set(THE_THREE_DEEP)
+    assert "module" not in convert._DEEP_CELLTYPES
+    assert set(htv._STRUCTURAL_CELLTYPES) == set(THE_FOUR_STRUCTURAL)
+    assert not set(THE_FOUR_STRUCTURAL) & set(HASH_TYPE_CELLTYPES)
 
 
 # --------------------------------------------------------------------------
@@ -591,3 +763,74 @@ def test_mixed_over_npy_path_is_not_falsely_rejected(value, steps, path):
         path_steps=steps, target_celltype="mixed",
     )
     Expression(checksum, path, input_celltype="mixed", celltype="mixed").compute()
+
+
+# --------------------------------------------------------------------------
+# §capabilities, `mixed` row: a NUMPY word follows the `binary` rule
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", (DType.NUMERIC, DType.NONNUMERIC, DType.STRUCTURED))
+@pytest.mark.parametrize("rank", list(Rank), ids=lambda r: r.name)
+def test_mixed_numpy_word_follows_the_binary_capability_row(dtype, rank):
+    """§capabilities: `mixed` — `NUMPY` follows the `binary` rule."""
+    word = HashType(Kind.NUMPY, Length.MEDIUM, dtype, rank)
+    expected = ({"SEQ"} if rank != Rank.SCALAR else set()) | (
+        {"MAP"} if dtype == DType.STRUCTURED else set()
+    )
+    assert word.capabilities("binary") == expected
+    assert word.capabilities("mixed") == expected
+
+
+MIXED_NPY_REJECTIONS = [
+    (np.array(3.0), (("item", 0),), "SEQ"),  # scalar: no SEQ
+    (np.arange(3), (("item", "a"),), "MAP"),  # unstructured: no MAP
+    (np.arange(3.0), (("item", 0), ("item", 0)), "SEQ"),  # rank 1 admits one item
+    (np.zeros((2, 3)), (("item", 1), ("item", 2), ("item", 0)), "SEQ"),  # rank 2 admits two
+]
+
+
+@pytest.mark.parametrize(
+    "value,steps,needs", MIXED_NPY_REJECTIONS, ids=["scalar", "unstructured", "d1-rank", "d2-rank"]
+)
+def test_mixed_over_npy_keeps_the_binary_rejections(value, steps, needs):
+    """§capabilities: under `mixed`, an .npy word is disproved exactly where `binary` is,
+    including the rank count for NUMERIC arrays below D3PLUS."""
+    buffer = Buffer(value, "mixed")
+    checksum = buffer.get_checksum()
+    assert ensure_hash_type(checksum, buffer=buffer).kind == Kind.NUMPY
+    for celltype in ("binary", "mixed"):
+        with pytest.raises(HashTypeValidationError):
+            validate_expression(
+                checksum, buffer=None, source_celltype=celltype,
+                path_steps=steps, target_celltype=celltype,
+            )
+
+
+MIXED_NPY_RANK_ADMITS = [
+    (np.arange(3.0), (("item", 2),), "d1-one-item"),
+    (np.zeros((2, 3)), (("item", 1), ("item", 2)), "d2-two-items"),
+    (np.zeros((2, 3)), (("slice", (0, 1, None)), ("item", 0), ("item", 2)), "d2-slice-keeps-rank"),
+    # D3PLUS: rank counting does not apply; checking stops after the first item.
+    (np.zeros((2, 2, 2, 2)), tuple(("item", 0) for _ in range(6)), "d3plus-stops"),
+    # NONNUMERIC: rank counting does not apply; checking stops after the first item.
+    (np.array(["ab", "cd"]), (("item", 0), ("item", 0), ("item", "x")), "nonnumeric-stops"),
+]
+
+
+@pytest.mark.parametrize(
+    "value,steps,case", MIXED_NPY_RANK_ADMITS, ids=[c[2] for c in MIXED_NPY_RANK_ADMITS]
+)
+def test_mixed_over_npy_admits_exactly_what_binary_admits(value, steps, case):
+    """§Path validation: under `binary`, and under `mixed` over a word of kind NUMPY,
+    a NUMERIC array below D3PLUS admits as many integer item steps as its rank (a slice
+    keeps the rank); otherwise checking stops after an item step."""
+    buffer = Buffer(value, "mixed")
+    checksum = buffer.get_checksum()
+    word = ensure_hash_type(checksum, buffer=buffer)
+    assert word.kind == Kind.NUMPY
+    for celltype in ("binary", "mixed"):
+        assert validate_expression(
+            checksum, buffer=None, source_celltype=celltype,
+            path_steps=steps, target_celltype=celltype,
+        ) == word

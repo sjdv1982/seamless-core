@@ -70,7 +70,7 @@ def test_deep_set_is_exactly_three_and_excludes_module():
 
 @pytest.mark.parametrize("source,target", _all_zero_path_pairs())
 def test_zero_path_table_is_exhaustive_at_construction(source, target):
-    """'Only these are legal ... everything else: rejected' (Zero-path conversions)."""
+    """'Only these are legal ... everything else: illegal: refused at construction with ValueError'."""
     checksum = Checksum("5a" * 32)
     if (source, target) in LEGAL_ZERO_PATH:
         Expression(checksum, input_celltype=source, celltype=target)
@@ -232,6 +232,43 @@ def test_cell_value_at_deep_celltype_rejects_a_nested_index(celltype):
     assert "nested" in cell.exception
 
 
+@pytest.mark.parametrize("celltype", DEEP)
+def test_cell_value_and_buffer_at_deep_celltype_are_the_unresolved_index(celltype):
+    """'.value' is {key: Checksum}; '.buffer' returns the index buffer; nothing is resolved."""
+    absent = _absent_checksum(b"deep-celltypes cell value member never stored " + celltype.encode())
+    index = _held({"k": absent.hex()}, "plain")
+    cell = Cell(celltype, checksum=index.get_checksum())
+    value = cell.value
+    assert value == {"k": absent}
+    assert type(value["k"]) is Checksum
+    assert cell.buffer.get_checksum() == index.get_checksum()
+
+
+@pytest.mark.parametrize("celltype", DEEP)
+def test_cell_buffer_at_deep_celltype_validates_at_the_mapped_celltype(celltype):
+    """'.buffer ... validates against the same mapped celltype as .value' (plain)."""
+    not_json = _held(b"\xff\xfe deep-celltypes not json at all")
+    cell = Cell(celltype, checksum=not_json.get_checksum())
+    with pytest.raises(HashTypeValidationError):
+        cell.buffer
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="deep-celltypes.md §When flatness is checked (row 'reading .value / .buffer at a deep "
+    "celltype': flatness checked = yes): contract ahead of code, and NOT listed under "
+    "§Implementation status: CellBase.buffer validates only at the mapped celltype (plain), "
+    "so a nested index is returned without error. The doc is internally inconsistent here: "
+    "§What a deep buffer is and cells.md describe .buffer as mapped-celltype validation only",
+)
+@pytest.mark.parametrize("celltype", DEEP)
+def test_cell_buffer_at_deep_celltype_rejects_a_nested_index(celltype):
+    nested = _held({"n": {"x": "aa" * 32}}, "plain")
+    cell = Cell(celltype, checksum=nested.get_checksum())
+    with pytest.raises(Exception, match="nested"):
+        cell.buffer
+
+
 # --- Paths -----------------------------------------------------------------
 
 
@@ -283,12 +320,56 @@ def test_one_step_member_validation_uses_the_childs_known_hash_type():
 
 @pytest.mark.parametrize("celltype,member", [("deepcell", "mixed"), ("deepfolder", "bytes"), ("folder", "bytes")])
 def test_projected_cell_takes_the_member_celltype(celltype, member):
-    """Current-status bug 'A projected Cell inherits the parent's deep celltype' is fixed."""
+    """'One step below a deep parent, a projection or handle carries the member celltype' (standalone)."""
     index = _held({"k": "99" * 32}, "plain")
     root = Cell(celltype, checksum=index.get_checksum())
     child = root["k"]
     assert child.celltype == member
     assert child.input_celltype == celltype
+
+
+@pytest.mark.parametrize("celltype", DEEP)
+def test_standalone_handle_reads_the_child_checksum_value_and_reference_form(celltype):
+    """d['k'].checksum is the child's checksum, .value the child's value,
+    .as_celltype('checksum') the reference form (Handles and writes one step below a deep parent)."""
+    if celltype == "deepcell":
+        member, member_value = _held({"x": 1}, "mixed"), {"x": 1}
+    else:
+        member, member_value = _held(b"member bytes"), b"member bytes"
+    index = _held({"k": member.get_checksum().hex()}, "plain")
+    handle = Cell(celltype, checksum=index.get_checksum())["k"]
+    assert handle.checksum == member.get_checksum()
+    assert handle.value == member_value
+    reference = handle.as_celltype("checksum")
+    assert reference.celltype == "checksum"
+    assert reference.checksum == Buffer(member.get_checksum(), "checksum").get_checksum()
+    assert isinstance(reference.value, Checksum)
+    assert reference.value == member.get_checksum()
+
+
+@pytest.mark.parametrize("celltype", DEEP)
+def test_standalone_handle_on_an_absent_member_evaluates_from_the_index_alone(celltype):
+    """Both targets are evaluated from the index buffer alone; no member buffer is fetched."""
+    absent = _absent_checksum(b"deep-celltypes handle over an absent member " + celltype.encode())
+    index = _held({"k": absent.hex()}, "plain")
+    handle = Cell(celltype, checksum=index.get_checksum())["k"]
+    assert handle.checksum == absent
+    assert handle.as_celltype("checksum").checksum == Buffer(absent, "checksum").get_checksum()
+
+
+@pytest.mark.parametrize("form", ["checksum", "buffer", "set_checksum"])
+@pytest.mark.parametrize("celltype", DEEP)
+def test_clearing_through_a_deep_handle_is_refused_with_value_error(celltype, form):
+    """'Clearing through the handle follows the general sub-path rule of cells.md (ValueError).'"""
+    member = _held({"v": 1}, "mixed") if celltype == "deepcell" else _held(b"member")
+    index = _held({"k": member.get_checksum().hex()}, "plain")
+    root = Cell(celltype, checksum=index.get_checksum())
+    with pytest.raises(ValueError):
+        if form == "set_checksum":
+            root["k"].set_checksum(None)
+        else:
+            setattr(root["k"], form, None)
+    assert root.checksum == index.get_checksum()
 
 
 # --- folder -> mixed -------------------------------------------------------
@@ -334,3 +415,129 @@ def test_non_empty_folder_to_mixed_to_plain_is_rejected(content):
     as_plain = Expression(as_mixed, input_celltype="mixed", celltype="plain")
     with pytest.raises((SeamlessConversionError, HashTypeValidationError)):
         as_plain.compute(execution="local")
+
+
+# --- Writes through a handle one step below a deep parent (cells.md, Writes through a handle) ---
+
+_DEEP_HANDLE_WRITE_GAP = pytest.mark.xfail(
+    strict=False,
+    reason="deep-celltypes.md §Implementation status (Standalone writes at k insert the value, "
+    "not the member checksum): contract ahead of code: a checksum/buffer write through d['k'] "
+    "must put the member checksum in index[k]; the code inserts the resolved value "
+    "(deepcell: index becomes nested) or fails to serialize a Buffer (deepfolder/folder)",
+)
+
+
+def _member_buffer(celltype):
+    if celltype == "deepcell":
+        return _held({"v": "new deep member"}, "mixed")
+    return _held(b"new folder member bytes")
+
+
+@_DEEP_HANDLE_WRITE_GAP
+@pytest.mark.parametrize("form", ["checksum", "set_checksum", "buffer", "set_buffer"])
+@pytest.mark.parametrize("celltype", DEEP)
+def test_handle_write_below_a_deep_parent_replaces_the_member_checksum(celltype, form):
+    old = _held({"v": "old"}, "mixed") if celltype == "deepcell" else _held(b"old bytes")
+    index = _held({"k": old.get_checksum().hex(), "other": old.get_checksum().hex()}, "plain")
+    new = _member_buffer(celltype)
+    root = Cell(celltype, checksum=index.get_checksum())
+    handle = root["k"]
+    argument = new.get_checksum() if "checksum" in form else new
+    if form.startswith("set_"):
+        getattr(handle, form)(argument)
+    else:
+        setattr(handle, form, argument)
+    assert root.value == {"k": new.get_checksum(), "other": old.get_checksum()}
+    assert handle.checksum == new.get_checksum()
+
+
+@pytest.mark.parametrize("celltype", DEEP)
+def test_handle_checksum_write_below_a_deep_parent_with_absent_buffer_records_nothing(celltype):
+    old = _held(b"old bytes") if celltype != "deepcell" else _held({"v": "old"}, "mixed")
+    index = _held({"k": old.get_checksum().hex()}, "plain")
+    root = Cell(celltype, checksum=index.get_checksum())
+    absent = _absent_checksum(b"deep-celltypes handle write, never stored " + celltype.encode())
+    with pytest.raises(CacheMissError):
+        root["k"].checksum = absent
+    assert root.checksum == index.get_checksum()
+
+
+# --- Null on illegal deep pairs; value writes and writes below k ------------
+
+_NULL_ILLEGAL_GAP = pytest.mark.xfail(
+    strict=False,
+    reason="deep-celltypes.md §Implementation status (Null passes illegal deep pairs, at "
+    "construction and in the engine; §Zero-path conversions): contract ahead of code: a null checksum is short-circuited before the deep "
+    "legality check, so an illegal deep pair is accepted and returns null",
+)
+
+ILLEGAL_DEEP_PAIRS = [
+    ("deepfolder", "deepcell"),
+    ("folder", "plain"),
+    ("plain", "deepcell"),
+    ("plain", "folder"),
+    ("deepcell", "mixed"),
+    ("deepcell", "int"),
+]
+
+
+@_NULL_ILLEGAL_GAP
+@pytest.mark.parametrize("source,target", ILLEGAL_DEEP_PAIRS)
+def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_at_construction(source, target):
+    null = _held(None, "plain")
+    with pytest.raises(ValueError):
+        Expression(null.get_checksum(), input_celltype=source, celltype=target)
+
+
+@_NULL_ILLEGAL_GAP
+@pytest.mark.parametrize("source,target", ILLEGAL_DEEP_PAIRS)
+def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_in_the_engine(source, target):
+    null = _held(None, "plain")
+
+    def fail():
+        raise AssertionError("an illegal deep pair must be refused without a fetch")
+
+    with pytest.raises(SeamlessConversionError):
+        convert_checksum(null.get_checksum(), source, target, fail)
+
+
+_VALUE_WRITE_GAP = pytest.mark.xfail(
+    strict=False,
+    reason="deep-celltypes.md §Implementation status (Standalone writes at k insert the value, "
+    "not the member checksum; §Handles and writes: a value write at k serializes v at the "
+    "member celltype and its checksum replaces index[k]): contract ahead of code: deepcell inserts "
+    "the value itself (index becomes nested); deepfolder/folder fail with 'Type is not JSON "
+    "serializable: Buffer'",
+)
+
+
+@_VALUE_WRITE_GAP
+@pytest.mark.parametrize("celltype", DEEP)
+def test_value_write_at_k_inserts_the_member_checksum(celltype):
+    old = _held({"v": "old"}, "mixed") if celltype == "deepcell" else _held(b"old bytes")
+    index = _held({"k": old.get_checksum().hex(), "other": old.get_checksum().hex()}, "plain")
+    root = Cell(celltype, checksum=index.get_checksum())
+    new_value = {"v": "new"} if celltype == "deepcell" else b"new bytes"
+    expected = Buffer(new_value, "mixed" if celltype == "deepcell" else "bytes").get_checksum()
+    root["k"].set(new_value)
+    assert root.value == {"k": expected, "other": old.get_checksum()}
+
+
+@pytest.mark.parametrize("form", ["set", "checksum", "buffer"])
+@pytest.mark.parametrize("celltype", DEEP)
+def test_write_below_k_is_refused_and_records_nothing(celltype, form):
+    """Ruling: writes below a deep parent are illegal below k (exception type unruled)."""
+    member = _held({"v": 1}, "mixed")
+    index = _held({"k": member.get_checksum().hex()}, "plain")
+    root = Cell(celltype, checksum=index.get_checksum())
+    target = root["k"]["v"]
+    replacement = _held(5, "mixed")
+    with pytest.raises(Exception):
+        if form == "set":
+            target.set(5)
+        elif form == "checksum":
+            target.checksum = replacement.get_checksum()
+        else:
+            target.buffer = replacement
+    assert root.checksum == index.get_checksum()

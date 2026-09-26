@@ -33,6 +33,44 @@ close()
     assert "seamless.references" not in result.stderr
 
 
+def test_cell_derivations_sharing_input_checksums_close_balanced():
+    """checksum-reference-lifecycle.md §10, *One open imbalance*: a warning was
+    once observed at seamless.close() on a Cell derivation path with shared input
+    checksums (the path the retired SubCell class took). This re-checks that path
+    after the copy fix: sibling projections with equal checksums, chained
+    projections, conversions, a checksum-backed re-root, and copies of the
+    unconverted handles. It does not reproduce the warning."""
+    result = _run(
+        _script(
+            """
+import copy
+import seamless
+from seamless import Cell
+root = Cell("plain")
+root.set({"x": {"y": 1}, "z": {"y": 1}, "w": 1})
+a, b = root["x"], root["z"]              # equal checksums, shared input
+c, d, e = a["y"], b["y"], root["w"]      # equal checksums again
+f, g = a.as_celltype("text"), c.as_celltype("int")
+rerooted = Cell(checksum=a.checksum, celltype="plain")["y"]
+plain = [a, b, c, d, e, rerooted]
+# Converted projections (f, g) are not copied: Cell.__copy__ raises on them, a
+# separate defect pinned in test_contract_reference_lifecycle.py.
+handles = plain + [f, g]
+handles += [copy.copy(h) for h in plain] + [copy.deepcopy(h) for h in plain]
+for handle in handles:
+    assert handle.checksum is not None
+    handle.value
+del a, handles
+seamless.close()
+print("CLOSED")
+"""
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CLOSED" in result.stdout
+    assert "seamless.references" not in result.stderr, result.stderr
+
+
 def test_explicit_close_reports_manual_leak_once_and_is_idempotent():
     result = _run(
         """

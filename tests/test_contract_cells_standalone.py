@@ -5,10 +5,12 @@ Companion of test_cells_contract_alignment.py (feature 5 alignment pass,
 live in seamless-workflow/tests/test_contract_cells_bound.py.
 """
 import asyncio
+import re
 
 import pytest
 
 from seamless import Buffer, Cell, Checksum, Expression
+from seamless.cell_errors import ProjectionError
 from seamless.checksum.expression import get_expression_cache
 from seamless.error_envelope import RunningLoopRefusal
 from tests.helpers.fake_remotes import drop_buffer, install_fake_remotes
@@ -257,3 +259,104 @@ def test_running_loop_refusal_leaves_state_waiting(monkeypatch):
         assert cell.state == "complete"
     finally:
         result_ref.clear()
+
+
+# --- Ruling 8: the wiring refusal text is contract ------------------------------------------
+
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Connecting / ruling 8: contract ahead of code: the refusal says 'Cannot implicitly convert "
+    "behind a projection; use as_celltype() before or after projecting' instead of the two-spelling message"))
+@pytest.mark.parametrize("api", ["constructor", "with_input"])
+def test_wiring_refusal_message_names_both_spellings(api):
+    """cells.md §Connecting: header line, then the two spellings (projection first), each glossed.
+
+    A standalone Cell has no name, so the unknown part is omitted and each
+    spelling starts at the step (the same rendering pins.md's standalone test pins).
+    """
+    source = Cell("text")
+    source.set("[10, 20, 30, 40]")
+    with pytest.raises(TypeError) as info:
+        if api == "constructor":
+            Cell("plain", source=source[3])
+        else:
+            Cell("plain").with_input(source[3])
+    lines = str(info.value).splitlines()
+    assert lines[0] == "would convert text -> plain behind a projection."
+    assert len(lines) == 3
+    projection_first, conversion_first = lines[1], lines[2]
+    assert re.match(r'^\s*(…|\.\.\.)\[3\]\.as_celltype\("plain"\)\s+'
+                    r'# item 3 of the text \(a character\), as plain$', projection_first)
+    assert re.match(r'^\s*(…|\.\.\.)\.as_celltype\("plain"\)\[3\]\s+'
+                    r'# item 3 of the parsed list$', conversion_first)
+
+
+# --- Projections: a Cell is a handle ----------------------------------------------------
+
+def test_list_membership_raises_on_a_non_identical_member_but_set_and_dict_do_not():
+    """cells.md §Projections: `x in [cells]` compares by identity first, then with ==, so it raises
+    ProjectionError as soon as it meets a non-identical member; hash-based membership does not."""
+    a = Cell("int")
+    a.set(1)
+    b = Cell("int")
+    b.set(1)
+    assert a in [a, b]  # identity hit before any == comparison
+    with pytest.raises(ProjectionError):
+        a in [b, a]
+    assert a in {b, a}
+    assert a in {a: 1}
+    assert hash(a) == hash(a) and hash(a) != hash(b)
+
+
+def test_value_unavailable_error_location():
+    """cells.md code-location table and §Projections: ValueUnavailableError lives in
+    seamless.cell_errors and is importable as seamless.ValueUnavailableError."""
+    import seamless
+    from seamless import cell_errors
+    assert seamless.ValueUnavailableError is cell_errors.ValueUnavailableError
+    assert issubclass(cell_errors.AuthorityError, cell_errors.WorkflowError)
+    assert issubclass(ProjectionError, TypeError) and issubclass(ProjectionError, AttributeError)
+
+
+# --- .set() / .value = take values only -------------------------------------------------
+
+def test_reference_refusal_messages():
+    """cells.md §`.set()` and `.value =` take values only: the quoted TypeError texts."""
+    target = Cell("int")
+    other = Cell("int")
+    other.set(3)
+    with pytest.raises(TypeError) as info:
+        target.set(Checksum("ab" * 32))
+    assert str(info.value) == ("A Checksum is not a value: use .set_checksum() "
+                               "(a Checksum is a value only for celltype 'checksum')")
+    with pytest.raises(TypeError) as info:
+        target.value = other
+    assert str(info.value) == "A Cell is not a value: connect it by assignment, or with Cell(source=...)"
+    assert target.checksum is None
+
+
+def test_a_64_character_str_is_always_a_value():
+    """cells.md §Celltype checksum: a 64-character str is a value, never a checksum;
+    Checksum == hex_str is true, but the two hash differently."""
+    digest = Checksum("ab" * 32)
+    cell = Cell("str")
+    cell.set(digest.hex())
+    assert cell.value == digest.hex()
+    assert cell.checksum == Buffer(digest.hex(), "str").get_checksum()
+    assert cell.checksum != digest
+    assert digest == digest.hex()
+    assert hash(digest) != hash(digest.hex())
+
+
+# --- Null and None: null only on legal pairs ------------------------------------------------
+
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of "
+    "code: a standalone null as_celltype child over an illegal pair reads back a complete NULL"))
+@pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder"])
+def test_null_as_celltype_child_over_an_illegal_pair_fails(celltype):
+    parent = Cell(celltype)
+    parent.set(None)
+    child = parent.as_celltype("int")
+    assert child.checksum is None
+    assert child.state == "failed"
+    assert isinstance(child.exception, str) and child.exception

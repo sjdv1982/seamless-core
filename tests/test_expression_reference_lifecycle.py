@@ -5,11 +5,14 @@ from seamless.expression_class import Expression
 from seamless.caching.buffer_cache import get_buffer_cache
 
 
-def test_dormant_expression_holds_input_until_release():
+def test_dormant_expression_keeps_its_input_by_tempref_only():
+    # checksum-reference-lifecycle.md §6/§7: Expression inputs are tempref-only.
     buffer = Buffer(b"dormant expression")
     checksum = buffer.get_checksum()
     expression = Expression(checksum, "", input_celltype="text", celltype="text")
-    assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 1
+    cache = get_buffer_cache()
+    assert cache.reference_snapshot().get(checksum, (0, 0, False))[0] == 0
+    assert not [role for cs, role in expression._refheld_checksums() if cs == checksum]
     expression._release_refholds()
     assert get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0] == 0
 
@@ -20,9 +23,9 @@ def test_public_expression_result_is_held_once():
     expression = Expression(checksum, "", input_celltype="text", celltype="text")
     result = expression.compute()
     cache = get_buffer_cache()
-    assert cache.reference_snapshot()[result][0] == 2  # input and public result
+    assert cache.reference_snapshot()[result][0] == 1  # public result only
     assert expression.compute() == result
-    assert cache.reference_snapshot()[result][0] == 2
+    assert cache.reference_snapshot()[result][0] == 1
     assert expression.result == result
     expression._release_refholds()
     assert cache.reference_snapshot().get(result, (0, 0, False))[0] == 0
@@ -36,11 +39,11 @@ def test_public_hold_after_internal_publication_is_acquired_once():
         checksum, "", "text", "text"
     )
     expression._publish_result(result)
-    assert get_buffer_cache().reference_snapshot().get(result, (0, 0, False))[0] == 1
+    assert get_buffer_cache().reference_snapshot().get(result, (0, 0, False))[0] == 0
     expression._enable_result_holding()
-    assert get_buffer_cache().reference_snapshot()[result][0] == 2
+    assert get_buffer_cache().reference_snapshot()[result][0] == 1
     expression._enable_result_holding()
-    assert get_buffer_cache().reference_snapshot()[result][0] == 2
+    assert get_buffer_cache().reference_snapshot()[result][0] == 1
     expression._release_refholds()
 
 
@@ -53,8 +56,8 @@ def test_equal_expressions_are_registered_and_released_independently():
     result = first.compute()
     second._publish_result(result)
     second._enable_result_holding()
-    assert get_buffer_cache().reference_snapshot()[result][0] == 4
+    assert get_buffer_cache().reference_snapshot()[result][0] == 2  # one result claim each
     first._release_refholds()
-    assert get_buffer_cache().reference_snapshot()[result][0] == 2
+    assert get_buffer_cache().reference_snapshot()[result][0] == 1
     second._release_refholds()
     assert get_buffer_cache().reference_snapshot().get(result, (0, 0, False))[0] == 0

@@ -4,7 +4,8 @@ Covers the rules that the existing lifecycle tests leave uncovered or only
 partially pin: tempref neutrality, neutral claims, the transfer write, the
 "non-scratch incref is the only publisher" rule, Expression ownership
 (tempref-only inputs, scratch-neutral result claim), fingertip non-publication,
-copy independence and top-level-only deep ownership.
+copy independence, top-level-only deep ownership and the §9 audit warning
+format.
 
 Buffer publication is observed by replacing ``buffer_writer.register``: every
 hashserver write of the buffer cache goes through it.
@@ -25,9 +26,6 @@ from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.checksum.cached_calculate_checksum import checksum_cache
 import seamless.checksum.expression as expression_mod
 from seamless.reference_lifecycle import collect_refholder_claims
-
-DOC = "internal/checksum-reference-lifecycle.md"
-
 
 def _fresh(label: str) -> Buffer:
     return Buffer(f"{label}-{uuid.uuid4().hex}".encode())
@@ -173,11 +171,6 @@ def test_expression_evaluation_and_result_reads_never_publish(writes):
     expression._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §6/§7: Expression inputs are tempref-only; the code takes an "
-    "'input' refholder claim (expression_class.py incref_refholder(scratch=True))",
-)
 def test_expression_input_is_tempref_only():
     source = Buffer({"a": f"input-tempref-{uuid.uuid4().hex}"}, "plain")
     checksum = source.get_checksum()
@@ -191,12 +184,6 @@ def test_expression_input_is_tempref_only():
         expression._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§8: an Expression has no scratch policy, so it must not change "
-    "scratch status; its input claim uses scratch=True and marks an owned, published "
-    "input as scratch",
-)
 def test_expression_does_not_mark_an_owned_input_scratch():
     cache = get_buffer_cache()
     source = Buffer({"a": f"owned-input-{uuid.uuid4().hex}"}, "plain")
@@ -211,11 +198,6 @@ def test_expression_does_not_mark_an_owned_input_scratch():
         owner._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §6: the Expression 'result' claim is scratch-neutral; the code "
-    "claims with scratch=True and re-marks a result a non-scratch owner holds",
-)
 def test_expression_result_claim_does_not_change_scratch_status():
     cache = get_buffer_cache()
     source = Buffer({"a": f"owned-result-{uuid.uuid4().hex}"}, "plain")
@@ -289,12 +271,6 @@ def _expression_holder():
     return expression, expression.compute(execution="local")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §5: copying a refholding object must create an independent "
-    "reference; copy.copy of a Cell/Expression duplicates the claim without "
-    "acquiring it, so releasing the copy releases the original's reference",
-)
 @pytest.mark.parametrize("make", [_cell_holder, _expression_holder], ids=["cell", "expression"])
 @pytest.mark.parametrize("copier", [copy.copy, copy.deepcopy], ids=["copy", "deepcopy"])
 def test_copied_refholder_owns_an_independent_reference(make, copier):
@@ -313,6 +289,36 @@ def test_copied_refholder_owns_an_independent_reference(make, copier):
             assert any(h is original for h, _ in collect_refholder_claims([original])[checksum])
     finally:
         original._release_refholds()
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="checksum-reference-lifecycle.md §5 (copying a Cell creates an independent "
+    "reference; §10 lists the copy defect as fixed): contract ahead of code: "
+    "Cell.__copy__ rebuilds a projected-then-converted Cell through Cell(source=..., "
+    "celltype=..., input_celltype=...), which trips _check_projected_source and raises "
+    "TypeError('Cannot implicitly convert behind a projection')",
+)
+@pytest.mark.parametrize("copier", [copy.copy, copy.deepcopy], ids=["copy", "deepcopy"])
+def test_copy_of_a_converted_projection_owns_an_independent_reference(copier):
+    root = Cell("plain")
+    root.set({"x": f"converted-copy-{uuid.uuid4().hex}"})
+    original = root["x"].as_celltype("text")
+    checksum = original.checksum
+    assert checksum is not None
+    before = _count(checksum)
+    duplicate = None
+    try:
+        duplicate = copier(original)
+        assert duplicate.checksum == checksum
+        claims = collect_refholder_claims([original, duplicate]).get(checksum, [])
+        assert len(claims) == _count(checksum), "claims and count disagree after copy"
+        duplicate._release_refholds()
+        assert _count(checksum) == before, "releasing the copy touched the original"
+    finally:
+        for holder in (duplicate, original, root):
+            if holder is not None:
+                holder._release_refholds()
 
 
 # --- §8 Deep checksums: only the top-level checksum is owned --------------------
@@ -335,3 +341,59 @@ def test_deep_input_owns_only_the_top_level_checksum(celltype):
         assert leaf_checksum not in collect_refholder_claims()
     finally:
         cell._release_refholds()
+
+
+# --- §9 Warning format -------------------------------------------------------------
+
+
+class _AuditHolder:
+    def __init__(self, checksum, role):
+        self.checksum, self.role = checksum, role
+
+    def _refheld_checksums(self):
+        return [(self.checksum, self.role)]
+
+    def _release_refholds(self):
+        pass
+
+
+def _holder_line(holder):
+    return f"  _AuditHolder 0x{id(holder):x} {holder.role}"
+
+
+def test_audit_warning_shapes_match_the_documented_format(caplog):
+    import logging
+
+    from seamless.caching.buffer_cache import BufferCache
+    from seamless.reference_lifecycle import audit_reference_accounting
+
+    cache = BufferCache()
+    checksum = Checksum(bytes.fromhex(uuid.uuid4().hex * 2))
+    first = _AuditHolder(checksum, "input:x")
+    second = _AuditHolder(checksum, "node:tf:current")
+    holders = [second, first]
+
+    def audit():
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="seamless.references"):
+            audit_reference_accounting(cache=cache, holders=holders)
+        return [r.getMessage() for r in caplog.records if r.name == "seamless.references"]
+
+    for _ in range(2):
+        cache.incref_refholder(checksum, scratch=None)
+    assert audit() == [], "a balanced audit must emit nothing"
+
+    cache.incref_refholder(checksum, scratch=None)  # count 3, claims 2
+    assert audit() == [
+        f"Checksum {checksum.hex()} has refholder count 3 but only 2 live claims; "
+        "1 is unattributed\n" + _holder_line(first) + "\n" + _holder_line(second)
+    ]
+
+    cache.decref_refholder(checksum)
+    cache.decref_refholder(checksum)  # count 1, claims 2
+    assert audit() == [
+        f"Checksum {checksum.hex()} has refholder count 1 but 2 live claims\n"
+        + _holder_line(first) + "\n" + _holder_line(second) + "\n"
+        "  A reference was not acquired or was released by code that did not own it"
+    ]
+    cache.decref_refholder(checksum)
