@@ -24,6 +24,7 @@ from seamless.checksum.expression import (
     evaluate_expression_remote,
     get_expression_cache,
 )
+from seamless.checksum.conversion import conversion_forbidden
 from seamless.checksum.null import NULL_CHECKSUM, is_null
 
 from tests.helpers.fake_remotes import drop_buffer, install_fake_remotes
@@ -210,12 +211,23 @@ _ORDINARY = [
 ]
 
 
-@pytest.mark.parametrize("celltype", _ORDINARY)
-@pytest.mark.parametrize("input_celltype", _ORDINARY)
-def test_empty_path_over_null_yields_null_for_every_pair(
+_LEGAL_PAIRS = [
+    (source, target)
+    for source in _ORDINARY
+    for target in _ORDINARY
+    if (source, target) not in conversion_forbidden
+]
+
+
+@pytest.mark.parametrize("input_celltype,celltype", _LEGAL_PAIRS)
+def test_empty_path_over_null_yields_null_for_every_legal_pair(
     monkeypatch, input_celltype, celltype
 ):
-    """expressions.md, The dummy Expression: null short-circuits for every pair."""
+    """expressions.md, The dummy Expression: a null input short-circuits to null
+    without fetching, for every LEGAL pair. Clarity ruling (2026-09-26): the null
+    short-circuit applies only on legal conversion pairs; illegal conversions stay
+    illegal for null. The forbidden pairs are pinned in
+    test_contract_celltypes_conversion.py and are not duplicated here."""
 
     def fail_if_fetched(*args, **kwargs):
         pytest.fail("a null input must not fetch a buffer")
@@ -238,7 +250,8 @@ def test_new_buffer_conversion_then_path_does_not_fuse():
 
 
 def test_deep_step_is_a_fusion_barrier():
-    """expressions.md, Fusion: a deep step ends the run."""
+    """expressions.md, Fusion: a deep step is a barrier and forms no pair; the run
+    ends at it, and what follows is a separate Expression over the child."""
     child = Buffer({"x": 5}, "mixed").get_checksum()
     index = Buffer({"member": child.hex()}, "deepcell").get_checksum()
     member = Expression(index, "member", input_celltype="deepcell", celltype="mixed")
@@ -264,8 +277,9 @@ def test_fused_chain_agrees_with_the_unfused_evaluation():
     assert fused.run() == "leaf"
 
 
-def test_free_expression_never_enters_a_waiting_set(monkeypatch):
-    """expressions.md, Cancellation: free class has no cancellable window."""
+def test_free_expression_never_enters_the_member_set(monkeypatch):
+    """expressions.md, Deduplication / Cancellation > API: a free Expression never
+    joins the member set keyed by Expression identity, so softcancel() is False."""
     source = Buffer(True, "bool").get_checksum()
     drop_buffer(source)
     dummy = Expression(source, input_celltype="bool", celltype="bool")
@@ -282,10 +296,264 @@ def test_free_expression_never_enters_a_waiting_set(monkeypatch):
 
 
 def test_expression_cancel_is_retired():
+    """expressions.md, Cancellation > API: cancel is retired, raises, names softcancel."""
     expression = Expression(_ANY, input_celltype="plain")
     with pytest.raises(Exception) as info:
         expression.cancel()
-    assert "softcancel" in str(info.value)
+    message = str(info.value)
+    assert "softcancel" in message
+    assert "no hard cancel" in message
+
+
+def test_module_softcancel_without_member_id_is_a_noop_returning_false():
+    """expressions.md, Cancellation > API: softcancel_expression(key, None) is a
+    no-op returning False, even while an evaluation of that key is in flight."""
+    source = Buffer({"a": "noop witness"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    key = (source_checksum.hex(), "a", "plain", "str")
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    original_resolution = Checksum.resolution
+
+    async def main():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated(checksum, *args, **kwargs):
+            if checksum == source_checksum:
+                started.set()
+                await release.wait()
+            return await original_resolution(checksum, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Checksum, "resolution", gated)
+            task = asyncio.create_task(expression.compute_async(execution="local"))
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                assert key in _active_expressions
+                assert expression_mod.softcancel_expression(key, None) is False
+                assert key in _active_expressions
+            finally:
+                release.set()
+            return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(main()) == Buffer("noop witness", "str").get_checksum()
+
+
+def _gated_local_resolution(source_checksum):
+    """Hold the shared local evaluation at its input fetch until released."""
+    original_resolution = Checksum.resolution
+    state = {
+        "started": asyncio.Event(),
+        "release": asyncio.Event(),
+        "interrupted": asyncio.Event(),
+    }
+
+    async def gated(checksum, *args, **kwargs):
+        if checksum == source_checksum:
+            state["started"].set()
+            try:
+                await state["release"].wait()
+            except asyncio.CancelledError:
+                state["interrupted"].set()
+                raise
+        return await original_resolution(checksum, *args, **kwargs)
+
+    return gated, state
+
+
+def test_softcancel_leaves_the_member_set_and_the_peer_keeps_the_evaluation(monkeypatch):
+    """expressions.md, Cancellation: softcancel() leaves the member set keyed by
+    Expression identity and returns True; the instance's own pending call ends
+    with asyncio.CancelledError; the remaining member keeps the one evaluation."""
+    source = Buffer({"a": "peer survives softcancel"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    first = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    second = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    original_apply_step = expression_mod._apply_step
+    applied = 0
+
+    def count_apply_step(value, step):
+        nonlocal applied
+        applied += 1
+        return original_apply_step(value, step)
+
+    monkeypatch.setattr(expression_mod, "_apply_step", count_apply_step)
+
+    async def main():
+        gated, state = _gated_local_resolution(source_checksum)
+        monkeypatch.setattr(Checksum, "resolution", gated)
+        task1 = asyncio.create_task(first.compute_async(execution="local"))
+        task2 = asyncio.create_task(second.compute_async(execution="local"))
+        try:
+            await asyncio.wait_for(state["started"].wait(), 5)
+            await asyncio.sleep(0)
+            assert first.softcancel() is True
+            assert first.softcancel() is False  # idempotent
+            with pytest.raises(asyncio.CancelledError):
+                await task1
+            assert not state["interrupted"].is_set()
+            state["release"].set()
+            return await asyncio.wait_for(task2, 5)
+        finally:
+            state["release"].set()
+            await asyncio.gather(task1, task2, return_exceptions=True)
+
+    result = asyncio.run(main())
+    assert result == Buffer("peer survives softcancel", "str").get_checksum()
+    assert applied == 1
+    assert second.softcancel() is False  # completed: no longer a member
+
+
+def test_cancelling_a_callers_task_softcancels_only_that_membership(monkeypatch):
+    """expressions.md, Cancellation: cancelling a caller's asyncio task unwinds that
+    caller's wait; the evaluator's cleanup softcancels its membership, so work
+    continues for the other member."""
+    source = Buffer({"a": "task cancel is soft"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    first = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    second = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+
+    async def main():
+        gated, state = _gated_local_resolution(source_checksum)
+        monkeypatch.setattr(Checksum, "resolution", gated)
+        task1 = asyncio.create_task(first.compute_async(execution="local"))
+        task2 = asyncio.create_task(second.compute_async(execution="local"))
+        try:
+            await asyncio.wait_for(state["started"].wait(), 5)
+            await asyncio.sleep(0)
+            task1.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task1
+            # The cleanup already removed the cancelled caller from the set.
+            assert first.softcancel() is False
+            await asyncio.sleep(0.05)
+            assert not state["interrupted"].is_set()
+            state["release"].set()
+            return await asyncio.wait_for(task2, 5)
+        finally:
+            state["release"].set()
+            await asyncio.gather(task1, task2, return_exceptions=True)
+
+    assert asyncio.run(main()) == Buffer("task cancel is soft", "str").get_checksum()
+
+
+class _ConflictResponse:
+    def __init__(self, status, text):
+        self.status = status
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def text(self):
+        return self._text
+
+
+class _ConflictSession:
+    """A database answering every Expression PUT as a key conflict (HTTP 409)."""
+
+    def __init__(self):
+        self.expression_puts = []
+
+    def put(self, url, json=None, **kwargs):
+        if json["type"] == "expression":
+            self.expression_puts.append(json)
+            return _ConflictResponse(
+                409, "ERROR: Expression already exists with different result"
+            )
+        return _ConflictResponse(200, "OK")
+
+    def get(self, url, json=None, **kwargs):
+        return _ConflictResponse(404, "")
+
+
+def test_database_key_conflict_raises_nothing_and_the_evaluation_keeps_its_result(
+    monkeypatch,
+):
+    """expressions.md, Identity: on a 409 key conflict the client raises nothing;
+    DatabaseClient.set_expression_result returns False, database_remote reports
+    the write as not done, and the evaluation still returns its own result, which
+    it has already recorded in the process-local Expression cache."""
+    pytest.importorskip("seamless_remote")
+    from seamless_remote import database_remote
+    from seamless_remote.database_client import DatabaseClient
+
+    session = _ConflictSession()
+    client = DatabaseClient(readonly=False)
+    client.url = "http://database.invalid"
+    client._initialized = True
+    client._get_session = lambda: session
+    monkeypatch.setattr(database_remote, "_read_database_clients", [])
+    monkeypatch.setattr(database_remote, "_write_database_clients", [client])
+
+    reported = []
+    original_set = database_remote.set_expression_result
+
+    async def recording_set(*args, **kwargs):
+        written = await original_set(*args, **kwargs)
+        reported.append(written)
+        return written
+
+    monkeypatch.setattr(database_remote, "set_expression_result", recording_set)
+
+    source = Buffer({"a": "mine"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+    expected = Buffer("mine", "str").get_checksum()
+
+    # "auto" with the input in process memory places the evaluation locally,
+    # through the dispatching entry point, which records identity in the database.
+    assert expression.compute(execution="auto") == expected
+    assert len(session.expression_puts) >= 1
+    assert reported and all(written is False for written in reported)
+    assert get_expression_cache()[(source_checksum.hex(), "a", "plain", "str")] == expected
+
+    direct = asyncio.run(
+        client.set_expression_result(source_checksum, "a", "plain", "str", expected)
+    )
+    assert direct is False
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="expressions.md, Results and caching / Evaluating, recording identity and "
+    "publishing: contract ahead of code: evaluate_expression_async (the local-only "
+    "evaluator behind execution='local') records the result in the process cache "
+    "only; only evaluate_expression_remote writes the database expression row",
+)
+def test_explicit_local_evaluation_also_records_identity_in_the_database(monkeypatch):
+    """expressions.md, Results and caching: successful results are recorded in the
+    process cache and, when seamless_remote is importable, in the database
+    `expression` table, by the evaluating process, wherever it was placed."""
+    pytest.importorskip("seamless_remote")
+    from seamless_remote import database_remote
+    from seamless_remote.database_client import DatabaseClient
+
+    session = _ConflictSession()  # records every Expression PUT it receives
+    client = DatabaseClient(readonly=False)
+    client.url = "http://database.invalid"
+    client._initialized = True
+    client._get_session = lambda: session
+    monkeypatch.setattr(database_remote, "_read_database_clients", [])
+    monkeypatch.setattr(database_remote, "_write_database_clients", [client])
+
+    source = Buffer({"a": "recorded locally"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+
+    assert expression.compute(execution="local") is not None
+    assert [
+        (put["checksum"], put["path"], put["input_celltype"], put["celltype"])
+        for put in session.expression_puts
+    ] == [(source_checksum.hex(), "a", "plain", "str")]
 
 
 def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
@@ -373,7 +641,9 @@ def test_client_without_jobserver_dispatches_to_the_daskserver(monkeypatch):
         evaluate_expression_remote(source_checksum, "a", "plain", "str", execution="auto")
     )
     assert result == result_checksum
-    assert sent == [(source_checksum, "a", "plain", "str", True)]
+    # The scratch flag is the requester's decision; this direct call names no
+    # requester, so only the identity fields are contract here.
+    assert [entry[:4] for entry in sent] == [(source_checksum, "a", "plain", "str")]
     assert "jobserver:run" not in calls
 
 

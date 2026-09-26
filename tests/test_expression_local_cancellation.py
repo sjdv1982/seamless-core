@@ -1,4 +1,5 @@
-"""Local Expression cancellation follows the materialization waiting-set contract."""
+"""Local Expression cancellation acts on the member set keyed by Expression
+identity (contracts/expressions.md, Deduplication / Cancellation)."""
 
 import asyncio
 

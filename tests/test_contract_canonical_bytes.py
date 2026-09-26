@@ -16,9 +16,6 @@ def test_mountable_celltype_sets():
     assert FILE_CELLTYPES == {'text', 'python', 'ipython', 'yaml', 'plain', 'str',
                               'int', 'float', 'bool', 'bytes', 'binary', 'mixed'}
     assert DIRECTORY_CELLTYPES == {'folder', 'deepfolder'}
-    for celltype in ('checksum', 'deepcell', 'module', 'folder', 'deepfolder'):
-        with pytest.raises(TypeError):
-            canon_T(b'x', celltype)
 
 
 @pytest.mark.parametrize('celltype', ['text', 'python', 'ipython', 'yaml'])

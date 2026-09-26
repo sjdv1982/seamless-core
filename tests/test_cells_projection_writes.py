@@ -10,29 +10,14 @@ clearing forms raise `ValueError`; writes through an `as_celltype` child raise
 `AuthorityError`. This supersedes "sub-path writes and augmented assignment are
 bound-only". The seamless-workflow file of the same name holds the bound cases.
 
-The code still refuses these writes with TypeError/AttributeError, so the
-cases are non-strict xfails that assert the ruled result.
+These tests assert the ruled result directly.
 """
 import pytest
-from seamless import Buffer, CacheMissError, Cell
+from seamless import Buffer, CacheMissError, Cell, Checksum
 from seamless.cell_errors import AuthorityError, ValueUnavailableError
 
 
 FORMS = ["value", "buffer", "checksum"]
-
-
-def ahead(why):
-    return pytest.mark.xfail(
-        strict=False,
-        reason="cells.md §Writes through a handle / §Projections (round 9): contract ahead of code: " + why,
-    )
-
-
-def gap(section, why):
-    return pytest.mark.xfail(strict=False, reason=f"cells.md §{section}: contract ahead of code: {why}")
-
-
-REFUSED = "standalone projection writes raise TypeError('Standalone projection writes are not supported')"
 
 
 def write(cell, form, method, value):
@@ -48,7 +33,6 @@ def _root(value=None):
     return root
 
 
-@ahead(REFUSED)
 @pytest.mark.parametrize("form", FORMS)
 @pytest.mark.parametrize("method", [False, True])
 def test_projection_write_matrix(form, method):
@@ -69,7 +53,6 @@ def test_projection_write_matrix(form, method):
         hold.clear()
 
 
-@ahead(REFUSED)
 @pytest.mark.parametrize("method", [False, True])
 def test_nested_projection_write_updates_the_root(method):
     root = _root({"a": {"b": 1}, "other": 2})
@@ -82,7 +65,6 @@ def test_nested_projection_write_updates_the_root(method):
     assert child.value == 5
 
 
-@ahead(REFUSED)
 @pytest.mark.parametrize("form", ["checksum", "set_checksum"])
 def test_projection_checksum_write_is_resolved_at_the_child_celltype(form):
     root = _root()
@@ -98,7 +80,6 @@ def test_projection_checksum_write_is_resolved_at_the_child_celltype(form):
         hold.clear()
 
 
-@ahead(REFUSED)
 def test_projection_set_checksum_with_input_celltype_converts_first():
     root = _root()
     five = Buffer("5", "str")
@@ -110,7 +91,6 @@ def test_projection_set_checksum_with_input_celltype_converts_first():
         hold.clear()
 
 
-@ahead(REFUSED)
 @pytest.mark.parametrize("form", ["checksum", "set_checksum"])
 def test_unresolvable_projection_checksum_write_raises_cache_miss(form):
     root = _root()
@@ -124,9 +104,6 @@ def test_unresolvable_projection_checksum_write_raises_cache_miss(form):
     assert root.exception is None
 
 
-@gap("Writes through a handle / Null and None",
-     "gap (a): clearing through a standalone child raises TypeError('Standalone projection writes are not supported') "
-     "instead of ValueError naming `c.b = None` and `del c[\"b\"]`")
 @pytest.mark.parametrize("form", ["checksum", "buffer", "set_checksum"],
                          ids=["checksum-None", "buffer-None", "set_checksum-None"])
 def test_clearing_a_standalone_sub_path_raises_value_error(form):
@@ -140,7 +117,6 @@ def test_clearing_a_standalone_sub_path_raises_value_error(form):
     assert root.value == {"a": 1, "other": 2}
 
 
-@ahead(REFUSED)
 def test_storing_null_through_a_child_is_a_pathed_write():
     root = _root()
     root.a.set(None)
@@ -157,24 +133,17 @@ _UNDER_SOURCE_WRITES = {
 }
 
 
-def _under_source(form, method, why):
+def _under_source(form, method):
     return pytest.param(form, method, id=(f"{form}-{'method' if method else 'property'}" if form in FORMS else form),
-                        marks=gap("Authority / Writes through a handle", "gap (b): " + why))
-
-
-_BEFORE_AUTHORITY = ("a projection write on a Cell with a source raises "
-                     "TypeError('Standalone projection writes are not supported') before the authority check")
+                        )
 
 
 @pytest.mark.parametrize("form, method", [
-    *[_under_source(form, method, _BEFORE_AUTHORITY) for form in FORMS for method in (False, True)],
-    _under_source("item", False, "item assignment raises TypeError('Standalone Cell item assignment is not supported') "
-                                 "instead of AuthorityError"),
-    _under_source("attribute", False, "attribute assignment raises AttributeError('a') instead of AuthorityError"),
-    _under_source("iadd", False, "augmented assignment through a child raises "
-                                 "TypeError('Augmented Cell updates require a bound Cell') instead of AuthorityError"),
-    _under_source("root-iadd", False, "root augmented assignment raises "
-                                      "TypeError('Augmented Cell updates require a bound Cell') instead of AuthorityError"),
+    *[_under_source(form, method) for form in FORMS for method in (False, True)],
+    _under_source("item", False),
+    _under_source("attribute", False),
+    _under_source("iadd", False),
+    _under_source("root-iadd", False),
 ])
 def test_projection_write_under_source_is_refused(form, method):
     source = Cell("plain")
@@ -195,7 +164,6 @@ def test_projection_write_under_source_is_refused(form, method):
         hold.clear()
 
 
-@ahead("standalone item/attribute assignment and augmented assignment are refused as bound-only")
 def test_subpath_assignment_and_augmented_assignment_are_pathed_root_writes():
     root = _root({"a": 1, "y": [1, 2]})
     root["a"] = 2
@@ -214,7 +182,6 @@ def test_subpath_assignment_and_augmented_assignment_are_pathed_root_writes():
     assert root.source is None
 
 
-@ahead("standalone root augmented assignment is refused as bound-only")
 def test_root_augmented_assignment_is_a_read_modify_set():
     cell = Cell("int")
     cell.set(1)
@@ -236,19 +203,8 @@ _AS_CELLTYPE_WRITES = {
     "iadd": lambda x: x.__iadd__(1),
 }
 
-_DETACHING = gap("Writes through a handle",
-                 "gap (c): a declare-family write on a standalone as_celltype child silently replaces the "
-                 "child's own input (detaches it from its parent) instead of raising AuthorityError")
-
-
 @pytest.mark.parametrize("form", [
-    "set", "set_buffer", "set_checksum",
-    pytest.param("value", marks=_DETACHING),
-    pytest.param("buffer", marks=_DETACHING),
-    pytest.param("checksum", marks=_DETACHING),
-    pytest.param("iadd", marks=gap("Writes through a handle",
-                                   "gap (c): += on a standalone as_celltype child raises "
-                                   "TypeError('Augmented Cell updates require a bound Cell') instead of AuthorityError")),
+    "set", "set_buffer", "set_checksum", "value", "buffer", "checksum", "iadd",
 ])
 def test_writes_through_a_standalone_as_celltype_child_raise_authority_error(form):
     """Round 9 / round 7 item 1: a conversion has no general inverse."""
@@ -263,10 +219,6 @@ def test_writes_through_a_standalone_as_celltype_child_raise_authority_error(for
 
 # --- Round 10: standalone `del` follows ruling B ------------------------------------------
 
-_DEL_REFUSED = "del raises TypeError('Standalone Cell item deletion is not supported')"
-
-
-@gap("Null and None / Projections (round 10)", _DEL_REFUSED + " instead of removing the key")
 def test_del_item_removes_the_key_from_the_root_value():
     root = _root()
     del root["a"]
@@ -277,7 +229,6 @@ def test_del_item_removes_the_key_from_the_root_value():
     assert root.value == {"other": 2}
 
 
-@gap("Null and None / Projections (round 10)", _DEL_REFUSED + " on a projection child instead of a pathed delete")
 @pytest.mark.parametrize("spelling", ["chained", "retained-child"])
 def test_nested_del_through_a_child_is_a_pathed_delete(spelling):
     root = _root({"a": {"b": 1, "c": 2}, "other": 3})
@@ -290,7 +241,6 @@ def test_nested_del_through_a_child_is_a_pathed_delete(spelling):
     assert root.value == {"a": {"c": 2}, "other": 3}
 
 
-@gap("Authority (round 10)", _DEL_REFUSED + " before the authority check, instead of AuthorityError")
 @pytest.mark.parametrize("spelling", ["root", "child"])
 def test_del_under_source_raises_authority_error(spelling):
     source = Cell("plain")
@@ -305,7 +255,6 @@ def test_del_under_source_raises_authority_error(spelling):
     assert root.source is source
 
 
-@gap("Writes through a handle (round 10)", _DEL_REFUSED + " on an as_celltype child instead of AuthorityError")
 def test_del_through_a_standalone_as_celltype_child_raises_authority_error():
     root = _root({"k": 1})
     child = root.as_celltype("mixed")
@@ -317,7 +266,6 @@ def test_del_through_a_standalone_as_celltype_child_raises_authority_error():
 
 # --- Remaining clauses of ruling B (rounds 9-10) ------------------------------------------
 
-@ahead(REFUSED)
 def test_buffer_writes_through_a_child_are_validated_at_the_child_celltype():
     root = _root()
     root.a.set_buffer(Buffer(b'"x"\n'))
@@ -329,7 +277,6 @@ def test_buffer_writes_through_a_child_are_validated_at_the_child_celltype():
     assert root.value == {"a": [1, 2], "other": 2}
 
 
-@ahead(REFUSED)
 def test_pathed_write_is_visible_to_the_next_read_and_to_existing_handles():
     root = _root()
     downstream = Cell(source=root)
@@ -345,7 +292,6 @@ def test_pathed_write_is_visible_to_the_next_read_and_to_existing_handles():
     assert unrelated.value == 2
 
 
-@ahead("augmented assignment on a standalone child raises TypeError('Augmented Cell updates require a bound Cell')")
 @pytest.mark.parametrize("op, operand, expected", [
     ("iadd", 3, 7), ("isub", 3, 1), ("imul", 3, 12), ("itruediv", 2, 2.0),
 ], ids=["+=", "-=", "*=", "/="])
@@ -358,7 +304,6 @@ def test_every_augmented_operator_through_a_child_is_a_pathed_write(op, operand,
     assert child.value == expected
 
 
-@ahead("augmented assignment on a standalone root raises TypeError('Augmented Cell updates require a bound Cell')")
 @pytest.mark.parametrize("op, operand, expected", [
     ("iadd", 3, 7), ("isub", 3, 1), ("imul", 3, 12), ("itruediv", 2, 2.0),
 ], ids=["+=", "-=", "*=", "/="])
@@ -369,9 +314,6 @@ def test_every_augmented_operator_on_a_root_is_a_read_modify_set(op, operand, ex
     assert cell.value == expected
 
 
-@gap("Writes through a handle",
-     "gap (c): item/attribute assignment on a standalone as_celltype child raises "
-     "TypeError('Standalone Cell item assignment is not supported') / AttributeError instead of AuthorityError")
 @pytest.mark.parametrize("spelling", ["item", "attribute"])
 def test_assignment_into_a_standalone_as_celltype_child_raises_authority_error(spelling):
     root = _root({"k": 1})
@@ -384,9 +326,6 @@ def test_assignment_into_a_standalone_as_celltype_child_raises_authority_error(s
     assert root.value == {"k": 1}
 
 
-@gap("Projections (materializability, standalone)",
-     "standalone item/attribute assignment on an unwired Cell raises TypeError/AttributeError "
-     "instead of bootstrapping an empty mapping")
 def test_unwired_standalone_cell_bootstraps_a_mapping_for_string_paths_only():
     cell = Cell("plain")
     cell.b.c = 12
@@ -404,3 +343,97 @@ def test_unwired_standalone_cell_bootstraps_a_mapping_for_string_paths_only():
     with pytest.raises(Exception):  # the exception type for a stored null is unspecified
         null.b = 1
     assert null.value is None
+
+
+
+# --- Writes below a deep parent (clarity rulings, 2026-09-26) ------------------------------
+
+def _deep_root(celltype, members):
+    member_celltype = "mixed" if celltype == "deepcell" else "bytes"
+    buffers = {key: Buffer(value, member_celltype) for key, value in members.items()}
+    holds = [buffer.tempref() for buffer in buffers.values()]
+    index = Buffer({key: buffer.get_checksum().hex() for key, buffer in buffers.items()}, "plain")
+    holds.append(index.tempref())
+    return Cell(celltype, checksum=index.get_checksum()), holds
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
+    "the write resolves the checksum to its value and inserts the value into the index, which then fails "
+    "validation ('Deep member 'k' must be a lowercase checksum')"))
+@pytest.mark.parametrize("form", ["checksum", "set_checksum"])
+def test_member_checksum_write_replaces_the_index_entry(form):
+    """At the one-step key k of a deep parent, the member checksum replaces index[k]."""
+    root, holds = _deep_root("deepcell", {"k": 1, "other": 2})
+    replacement = Buffer(5, "mixed")
+    holds.append(replacement.tempref())
+    try:
+        if form == "checksum":
+            root["k"].checksum = replacement.get_checksum()
+        else:
+            root["k"].set_checksum(replacement.get_checksum())
+        index = root.value
+        assert index["k"] == replacement.get_checksum()
+        assert index["other"] == Buffer(2, "mixed").get_checksum()
+        assert root["k"].value == 5
+    finally:
+        for hold in holds:
+            hold.clear()
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
+    "the value is inserted into the index as a value instead of as its member-celltype checksum "
+    "(deepcell: 'Deep member 'k' is nested'; deepfolder/folder: 'Type is not JSON serializable: Buffer')"))
+@pytest.mark.parametrize("celltype, value", [
+    ("deepcell", {"x": 5}), ("deepfolder", b"file bytes"), ("folder", b"folder bytes"),
+])
+def test_member_value_write_is_serialized_at_the_member_celltype(celltype, value):
+    """A value write at k serializes the value at the member celltype and inserts its checksum."""
+    member_celltype = "mixed" if celltype == "deepcell" else "bytes"
+    root, holds = _deep_root(celltype, {"k": {"old": 1} if celltype == "deepcell" else b"old"})
+    try:
+        root["k"].set(value)
+        entry = root.value["k"]
+        assert isinstance(entry, Checksum)
+        assert entry == Buffer(value, member_celltype).get_checksum()
+    finally:
+        for hold in holds:
+            hold.clear()
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
+    "the buffer is parsed and its value inserted into the index instead of its member checksum"))
+@pytest.mark.parametrize("form", ["buffer", "set_buffer"])
+@pytest.mark.parametrize("celltype, value", [("deepcell", {"x": 5}), ("folder", b"folder bytes")])
+def test_member_buffer_write_inserts_the_buffer_checksum(form, celltype, value):
+    """A buffer write at k validates the buffer at the member celltype and puts its checksum in index[k]."""
+    member_celltype = "mixed" if celltype == "deepcell" else "bytes"
+    root, holds = _deep_root(celltype, {"k": {"old": 1} if celltype == "deepcell" else b"old", "other": b"o" if celltype != "deepcell" else 2})
+    replacement = Buffer(value, member_celltype)
+    holds.append(replacement.tempref())
+    try:
+        if form == "buffer":
+            root["k"].buffer = replacement
+        else:
+            root["k"].set_buffer(replacement)
+        index = root.value
+        assert index["k"] == replacement.get_checksum()
+        assert set(index) == {"k", "other"}
+    finally:
+        for hold in holds:
+            hold.clear()
+
+
+def test_writes_below_a_deep_member_are_illegal():
+    """Writes below k are illegal; the exception class is unruled."""
+    root, holds = _deep_root("deepcell", {"k": {"x": 1}})
+    try:
+        before = root.value
+        with pytest.raises(Exception):
+            root["k"]["x"].set(3)
+        assert root.value == before
+    finally:
+        for hold in holds:
+            hold.clear()

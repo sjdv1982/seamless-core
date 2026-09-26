@@ -272,7 +272,7 @@ def test_projected_source_cannot_implicitly_convert(world, api):
     target = world.make("plain")
     target.set({"unchanged": True})
     world.settle(source, target)
-    with pytest.raises(TypeError, match="project"):
+    with pytest.raises(TypeError):  # message text: ruling-8 tests
         if api == "constructor":
             world.make("plain", source=source[3])
         else:
@@ -502,14 +502,15 @@ def test_one_shot_input_override_does_not_mutate_cell(world, method):
         hold.clear()
 
 
-@pytest.mark.parametrize("constructor", [
-    lambda cs: Cell("int", checksum=cs, source=Cell("int")),
-    lambda cs: Cell("int", source=cs),
-    lambda cs: Cell("int", source=Cell("text"), input_celltype="plain"),
+@pytest.mark.parametrize("constructor, error", [
+    (lambda cs: Cell("int", checksum=cs, source=Cell("int")), TypeError),
+    (lambda cs: Cell("int", source=cs), TypeError),
+    (lambda cs: Cell("int", source=Cell("text"), input_celltype="plain"), ValueError),
 ], ids=["checksum-and-source", "bare-checksum-as-source", "conflicting-typed-declaration"])
-def test_constructor_rejects_invalid_reference_declarations(world, constructor):
+def test_constructor_rejects_invalid_reference_declarations(world, constructor, error):
+    """cells.md §The definition: TypeError, TypeError naming checksum=, ValueError respectively."""
     checksum = Buffer(137, "int").get_checksum()
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(error):
         world.bind(constructor(checksum))
 
 
@@ -585,8 +586,12 @@ def test_deep_one_step_selects_member_checksum(world, celltype, member_type, val
             hold.clear()
 
 
-@pytest.mark.parametrize("celltype", celltypes + ["deepcell", "deepfolder", "folder", "module"])
+_NULL_ILLEGAL_TO_INT = ["python", "ipython", "deepcell", "deepfolder", "folder"]
+
+
+@pytest.mark.parametrize("celltype", [c for c in celltypes if c not in _NULL_ILLEGAL_TO_INT])
 def test_null_retype_keeps_checksum(world, celltype):
+    """cells.md §Null and None: null converts to itself, on legal conversion pairs only."""
     cell = world.make(celltype)
     cell.set(None)
     world.settle(cell)
@@ -599,6 +604,22 @@ def test_null_retype_keeps_checksum(world, celltype):
     assert cell.checksum == checksum
     assert cell.value is None
     assert cell.state == "complete"
+
+
+# `module` -> `int` is not specified anywhere, so it is pinned neither way.
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
+    "the null checksum short-circuits the illegal conversion and the cell reports a complete NULL"))
+@pytest.mark.parametrize("celltype", _NULL_ILLEGAL_TO_INT)
+def test_null_retype_over_an_illegal_pair_fails(world, celltype):
+    cell = world.make(celltype)
+    cell.set(None)
+    world.settle(cell)
+    cell.celltype = "int"
+    world.settle(cell)
+    assert cell.checksum is None
+    assert cell.state == "failed"
+    assert isinstance(cell.exception, str) and cell.exception
 
 
 def test_preserving_conversion_then_path_fuses(world):

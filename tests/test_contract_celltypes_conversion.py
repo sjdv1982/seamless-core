@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pytest
 
-from seamless import Buffer, Checksum
+from seamless import Buffer, Checksum, Expression
 from seamless.checksum.celltypes import celltypes
 from seamless.checksum.conversion import (
     SeamlessConversionError,
@@ -80,6 +80,31 @@ def test_module_is_not_a_conversion_celltype(position):
     source, target = ("module", "plain") if position == "source" else ("plain", "module")
     with pytest.raises(TypeError):
         convert_checksum(Checksum("44" * 32), source, target, _fail_if_fetched)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=f"{DOC} §Celltypes, 'What each component accepts': contract ahead of "
+    "code: conversion_needs_buffer swallows the TypeError of convert_checksum and "
+    "returns False for a celltype outside the engine (gap not yet listed under "
+    "Implementation status)",
+)
+@pytest.mark.parametrize("name", ["module", "not-a-celltype"])
+@pytest.mark.parametrize("position", ["source", "target"])
+def test_conversion_needs_buffer_rejects_celltypes_outside_the_engine(position, name):
+    """§Celltypes: the engine row names conversion_needs_buffer too."""
+    source, target = (name, "plain") if position == "source" else ("plain", name)
+    with pytest.raises(TypeError):
+        conversion_needs_buffer(Checksum("44" * 32), source, target)
+
+
+@pytest.mark.parametrize("name", ["deepcell", "deepfolder", "folder", "module"])
+def test_buffer_layer_maps_deep_names_and_module_to_plain(name):
+    """§Where this page sits: Buffer._map_celltype serializes and parses all four
+    names as plain."""
+    assert Buffer._map_celltype(name) == "plain"
+    value = {"a": 1}
+    assert Buffer(value, name).content == Buffer(value, "plain").content
 
 
 # --- The celltype hierarchy is a checksum hierarchy -------------------------
@@ -153,18 +178,76 @@ def test_boolean_checksum_reads_as_json_text_under_text():
 @pytest.mark.parametrize(
     "raw,celltype",
     [
-        (b"def (:\n", "python"),
-        (b"a: b: c\n", "yaml"),
-        (b"\xff\xfe", "text"),
         (b'{"a": 1}', "binary"),
         (b'{"a": 1}', "str"),
         (b"[1]", "str"),
-        (b"hello", "checksum"),
-        (b'"' + b"ab" * 32 + b'"', "checksum"),
+        (b"[1]", "int"),
+        (b'{"a": 1}', "float"),
+        (b"{", "plain"),
+        (b"\xff\xfe", "mixed"),
     ],
 )
-def test_reference_parser_rejects_invalid_readings(raw, celltype):
-    """§Reference parser: syntax/storage failures raise HashTypeValidationError."""
+def test_reference_parser_value_error_rows_guarantee_only_value_error(raw, celltype):
+    """§Reference parser, Exception classes: the rows marked ValueError (plain,
+    binary, mixed, str, int, float) guarantee only the ValueError family; a
+    subclass (e.g. HashTypeValidationError from step 2) is conformant."""
+    with pytest.raises(ValueError):
+        _parse(raw, celltype)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"hello", b'"' + b"ab" * 32 + b'"', b"ab" * 31, b"zz" * 32],
+)
+def test_checksum_row_failures_raise_hash_type_validation_error(raw):
+    """§Reference parser, Exception classes: a failure in the checksum row is
+    HashTypeValidationError (contract)."""
+    with pytest.raises(HashTypeValidationError):
+        _parse(raw, "checksum")
+
+
+@pytest.mark.parametrize(
+    "raw,celltype",
+    [
+        (b"1\n", "bool"),
+        (b"0", "bool"),
+        (b'"hello"', "bool"),
+        (b"true", "int"),
+        (b"false\n", "int"),
+        (b"true\n", "float"),
+        (b"false", "float"),
+    ],
+)
+def test_step_one_refusals_are_plain_value_error_not_hash_type_error(raw, celltype):
+    """§Reference parser, Exception classes: bool over a non-boolean checksum and
+    int/float over a boolean checksum are refused at step 1 (virtual_value) with a
+    plain ValueError, decided from the checksum without HashType."""
+    with pytest.raises(ValueError) as exc_info:
+        _parse(raw, celltype)
+    assert not isinstance(exc_info.value, HashTypeValidationError)
+
+
+@pytest.mark.parametrize("celltype", ["plain", "str", "int", "float", "text", "yaml"])
+def test_step_two_hash_type_disproof_raises_hash_type_validation_error(celltype):
+    """§Reference parser, Exception classes: a HashType disproof at step 2 raises
+    HashTypeValidationError whatever the celltype. Non-UTF-8, non-.npy bytes are
+    proved non-deserializable as every JSON/text celltype by classification."""
+    from seamless.checksum.hash_type_validation import validate_deserializable_as
+
+    buffer = Buffer(b"\xff\xfe\x00\x01")
+    checksum = buffer.get_checksum()
+    with pytest.raises(HashTypeValidationError):
+        validate_deserializable_as(checksum, celltype, buffer=buffer)
+    with pytest.raises(HashTypeValidationError):
+        _parse_buffer(buffer, checksum, celltype)
+
+
+@pytest.mark.parametrize(
+    "raw,celltype",
+    [(b"def (:\n", "python"), (b"a: b: c\n", "yaml"), (b"\xff\xfe", "text")],
+)
+def test_text_parser_failures_raise_hash_type_validation_error(raw, celltype):
+    """§Reference parser, text row: 'Failure raises HashTypeValidationError'."""
     with pytest.raises(HashTypeValidationError):
         _parse(raw, celltype)
 
@@ -182,7 +265,7 @@ def test_numeric_readings_accept_exactly_1000_bytes(celltype, accepted, rejected
     """§Reference parser: only buffers OVER 1000 bytes are rejected."""
     assert (len(accepted), len(rejected)) == (1000, 1001)
     assert _parse(accepted, celltype) == 1
-    with pytest.raises(HashTypeValidationError):
+    with pytest.raises(ValueError):
         _parse(rejected, celltype)
 
 
@@ -190,7 +273,7 @@ def test_numeric_readings_accept_exactly_1000_bytes(celltype, accepted, rejected
 @pytest.mark.parametrize("raw", [b'"nan"', b'"inf"', b'"-inf"', b"NaN", b"Infinity"])
 def test_numeric_readings_reject_nonfinite(celltype, raw):
     """§Reference parser: only a finite number or finite-float string is accepted."""
-    with pytest.raises(HashTypeValidationError):
+    with pytest.raises(ValueError):
         _parse(raw, celltype)
 
 
@@ -204,7 +287,8 @@ def test_int_reading_truncates(raw, expected):
 
 
 def test_large_integers_lose_precision_through_orjson():
-    """§Large integers (current limitation): orjson returns a float beyond u64."""
+    """§Large integers / §Deliberate imprecisions (contract, not a limitation):
+    orjson returns a float beyond u64, so int and plain readings are imprecise."""
     big = 2**64 + 1
     raw = str(big).encode()
     assert _parse(raw, "int") != big
@@ -305,6 +389,84 @@ def test_binary_keeps_nonfinite_elements_in_their_own_dtype():
 
 def test_conversion_error_is_a_value_error():
     assert issubclass(SeamlessConversionError, ValueError)
+
+
+def test_rule_table_category_sizes():
+    """§Rule table: 18 T, 14 RI, 10 RF, 7 P, 30 V, 16 X, 32 =, 29 » = 156 pairs."""
+    from seamless.checksum import conversion as c
+
+    sizes = {
+        "trivial": len(c.conversion_trivial),
+        "reinterpret": len(c.conversion_reinterpret),
+        "reformat": len(c.conversion_reformat),
+        "possible": len(c.conversion_possible),
+        "values": len(c.conversion_values),
+        "forbidden": len(c.conversion_forbidden),
+        "equivalent": len(c.conversion_equivalent),
+        "chain": len(c.conversion_chain),
+    }
+    assert sizes == {
+        "trivial": 18,
+        "reinterpret": 14,
+        "reformat": 10,
+        "possible": 7,
+        "values": 30,
+        "forbidden": 16,
+        "equivalent": 32,
+        "chain": 29,
+    }
+    assert sum(sizes.values()) == 13 * 12 == 156
+
+
+def _check_conversions_with(monkeypatch, **tables):
+    from seamless.checksum import conversion as c
+
+    for name, table in tables.items():
+        monkeypatch.setattr(c, name, table)
+    c.check_conversions()
+
+
+def test_check_conversions_accepts_the_shipped_table():
+    from seamless.checksum.conversion import check_conversions
+
+    check_conversions()
+
+
+def test_check_conversions_raises_on_a_missing_pair(monkeypatch):
+    """§Rule table: check_conversions() raises on a missing pair."""
+    from seamless.checksum import conversion as c
+
+    trimmed = set(c.conversion_trivial) - {("int", "plain")}
+    with pytest.raises(SeamlessConversionError, match="Missing"):
+        _check_conversions_with(monkeypatch, conversion_trivial=trimmed)
+
+
+def test_check_conversions_raises_on_a_duplicate(monkeypatch):
+    """§Rule table: check_conversions() raises on a duplicate."""
+    from seamless.checksum import conversion as c
+
+    doubled = set(c.conversion_reformat) | {("int", "plain")}
+    with pytest.raises(SeamlessConversionError, match="Duplicate"):
+        _check_conversions_with(monkeypatch, conversion_reformat=doubled)
+
+
+def test_check_conversions_raises_on_a_circular_mapping(monkeypatch):
+    """§Rule table: check_conversions() raises on a circular mapping."""
+    from seamless.checksum import conversion as c
+
+    a, b = ("int", "plain"), ("plain", "int")
+    trivial = set(c.conversion_trivial) - {a}
+    reinterpret = set(c.conversion_reinterpret) - {b}
+    equivalent = dict(c.conversion_equivalent)
+    equivalent[a] = b
+    equivalent[b] = a
+    with pytest.raises(SeamlessConversionError, match="Circular"):
+        _check_conversions_with(
+            monkeypatch,
+            conversion_trivial=trivial,
+            conversion_reinterpret=reinterpret,
+            conversion_equivalent=equivalent,
+        )
 
 
 @pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
@@ -417,6 +579,54 @@ def test_bytes_to_binary_rejects_a_coincidental_npy_magic():
     assert calls == [None]
 
 
+@pytest.mark.parametrize("source", ["binary", "mixed"])
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (np.array(b"ab\x00"), b"ab\x00"),
+        (np.frombuffer(b"ab\x00", dtype="S1"), b"ab\x00"),
+        (np.frombuffer(b"abcd", dtype="S1").reshape(2, 2), b"abcd"),
+        (np.array([b"ab", b"c"]), b"abc\x00"),
+    ],
+)
+def test_s_array_to_bytes_is_tobytes_for_any_shape(source, value, expected):
+    """§Reformat rules, binary/mixed->bytes: any dtype-S array becomes .tobytes()."""
+    buffer = Buffer(value, source)
+    result_checksum, result_buffer = convert_checksum(
+        buffer.get_checksum(), source, "bytes", lambda: buffer
+    )
+    assert result_buffer is not None
+    assert result_buffer.content == expected
+    assert result_checksum == Buffer(expected).get_checksum()
+
+
+@pytest.mark.parametrize("source", ["binary", "mixed"])
+def test_empty_s_array_to_bytes_is_canonical_null(source):
+    """§Reformat rules, binary/mixed->bytes: an empty S array is empty bytes."""
+    buffer = Buffer(np.frombuffer(b"", dtype="S1"), source)
+    result_checksum, result_buffer = convert_checksum(
+        buffer.get_checksum(), source, "bytes", lambda: buffer
+    )
+    assert result_checksum == NULL_CHECKSUM
+    assert result_buffer.content == NULL_BUFFER
+
+
+@pytest.mark.parametrize("source", ["binary", "mixed"])
+@pytest.mark.parametrize(
+    "array",
+    [np.array([1, 2]), np.array(3.5), np.array(["ab"]), np.array([1 + 2j])],
+    ids=["int", "0d-float", "unicode-U", "complex"],
+)
+def test_non_s_array_to_bytes_keeps_the_npy_checksum(source, array):
+    """§Reformat rules, binary->bytes (and mixed->bytes on .npy magic): any array
+    whose dtype is not S keeps its .npy checksum."""
+    buffer = Buffer(array, source)
+    assert buffer.content.startswith(MAGIC_NUMPY)
+    assert convert_checksum(
+        buffer.get_checksum(), source, "bytes", lambda: buffer
+    ) == (buffer.get_checksum(), None)
+
+
 def test_raw_bytes_with_coincidental_npy_magic_have_a_checksum():
     raw = MAGIC_NUMPY + b"garbage"
     buffer = Buffer(raw)
@@ -517,9 +727,18 @@ def test_binary_array_converts_through_plain_and_text(target):
 # --- Empty-path Expression is the engine's only caller ----------------------
 
 
+_NULL_CONTRACT = (
+    f"{DOC} §Null and conversion legality / Implementation status (null "
+    "short-circuits only on legal pairs): contract ahead of code: "
+)
+
+
 @pytest.mark.parametrize("source", list(celltypes))
-def test_empty_path_expression_short_circuits_null_for_every_pair(source, monkeypatch):
-    """§Executor: null input -> null result for every pair, before the executor."""
+def test_empty_path_expression_short_circuits_null_for_every_legal_pair(
+    source, monkeypatch
+):
+    """§Executor: null input -> null result, before the executor, for every
+    LEGAL pair (clarity ruling: illegal conversions remain illegal for null)."""
     from seamless.checksum import convert as convert_module
     from seamless.checksum.expression import evaluate_expression, get_expression_cache
 
@@ -530,7 +749,246 @@ def test_empty_path_expression_short_circuits_null_for_every_pair(source, monkey
     get_expression_cache().clear()
     null = Checksum(NULL_CHECKSUM)
     for target in celltypes:
+        if (source, target) in conversion_forbidden:
+            continue
         assert evaluate_expression(null, "", source, target) == null
+
+
+_NULL_FORMS = [
+    pytest.param(Checksum(NULL_CHECKSUM), id="canonical"),
+    pytest.param(Checksum(hashlib.sha256(b"null").digest()), id="noncanonical"),
+]
+
+
+@pytest.mark.parametrize("null", _NULL_FORMS)
+@pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
+def test_engine_refuses_null_on_every_forbidden_pair(source, target, null):
+    """Ruling: illegal conversions remain illegal for null (engine level)."""
+    with pytest.raises(SeamlessConversionError):
+        convert_checksum(null, source, target, _fail_if_fetched)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=_NULL_CONTRACT + "Expression construction accepts the canonical null "
+    "on a forbidden pair (a non-null or non-canonical null checksum is refused)",
+)
+@pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
+def test_expression_construction_refuses_null_on_every_forbidden_pair(source, target):
+    with pytest.raises(ValueError):
+        Expression(Checksum(NULL_CHECKSUM), input_celltype=source, celltype=target)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=_NULL_CONTRACT + "empty-path evaluation returns NULL for a canonical "
+    "null input on a forbidden pair",
+)
+@pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
+def test_empty_path_evaluation_refuses_null_on_every_forbidden_pair(source, target):
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    get_expression_cache().clear()
+    with pytest.raises(ValueError):
+        evaluate_expression(Checksum(NULL_CHECKSUM), "", source, target)
+
+
+_ILLEGAL_DEEP_PAIRS = [
+    ("deepfolder", "deepcell"),
+    ("folder", "plain"),
+    ("plain", "deepcell"),
+    ("plain", "deepfolder"),
+    ("plain", "folder"),
+    ("deepcell", "text"),
+    ("text", "folder"),
+    ("deepcell", "mixed"),
+    ("deepfolder", "mixed"),
+    ("checksum", "deepcell"),
+]
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=_NULL_CONTRACT + "convert_checksum returns (null, None) for either "
+    "null form on an illegal deep pair",
+)
+@pytest.mark.parametrize("null", _NULL_FORMS)
+@pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
+def test_engine_refuses_null_on_illegal_deep_pairs(source, target, null):
+    with pytest.raises(SeamlessConversionError):
+        convert_checksum(null, source, target, _fail_if_fetched)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=_NULL_CONTRACT + "Expression construction accepts the canonical null "
+    "on an illegal deep pair",
+)
+@pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
+def test_expression_refuses_null_on_illegal_deep_pairs(source, target):
+    with pytest.raises(ValueError):
+        Expression(Checksum(NULL_CHECKSUM), input_celltype=source, celltype=target)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=_NULL_CONTRACT + "empty-path evaluation returns NULL for a canonical "
+    "null input on an illegal deep pair",
+)
+@pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
+def test_empty_path_evaluation_refuses_null_on_illegal_deep_pairs(source, target):
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    get_expression_cache().clear()
+    with pytest.raises(ValueError):
+        evaluate_expression(Checksum(NULL_CHECKSUM), "", source, target)
+
+
+_LEGAL_DEEP_PAIRS = [
+    ("deepcell", "deepcell"),
+    ("deepfolder", "deepfolder"),
+    ("folder", "folder"),
+    ("deepcell", "plain"),
+    ("deepfolder", "plain"),
+    ("folder", "deepfolder"),
+    ("deepfolder", "folder"),
+    ("deepcell", "deepfolder"),
+    ("folder", "mixed"),
+]
+_LEGAL_ORDINARY_PAIRS = [
+    (source, target)
+    for source in celltypes
+    for target in celltypes
+    if (source, target) not in conversion_forbidden
+]
+
+
+@pytest.mark.parametrize("source,target", _LEGAL_ORDINARY_PAIRS + _LEGAL_DEEP_PAIRS)
+def test_expression_construction_accepts_null_on_every_legal_pair(source, target):
+    """§Null and conversion legality, legal row: construction succeeds."""
+    expression = Expression(
+        Checksum(NULL_CHECKSUM), input_celltype=source, celltype=target
+    )
+    assert expression.input_celltype == source
+
+
+@pytest.mark.parametrize("source,target", _LEGAL_DEEP_PAIRS)
+def test_empty_path_evaluation_short_circuits_null_on_legal_deep_pairs(
+    source, target, monkeypatch
+):
+    """§Null and conversion legality, legal row: a legal deep pair yields the
+    canonical null without calling the executor."""
+    from seamless.checksum import convert as convert_module
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    def engine_called(*args, **kwargs):
+        raise AssertionError("executor must not be called for a null input")
+
+    monkeypatch.setattr(convert_module, "convert_checksum", engine_called)
+    get_expression_cache().clear()
+    null = Checksum(NULL_CHECKSUM)
+    assert evaluate_expression(null, "", source, target) == null
+
+
+def test_empty_bytes_input_is_canonicalized_then_short_circuited(monkeypatch):
+    """§Null and conversion legality, 'Which inputs count as null': the key
+    canonicalizes empty bytes (input celltype bytes) to NULL_CHECKSUM first."""
+    from seamless.checksum import convert as convert_module
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    def engine_called(*args, **kwargs):
+        raise AssertionError("executor must not be called for a null input")
+
+    monkeypatch.setattr(convert_module, "convert_checksum", engine_called)
+    get_expression_cache().clear()
+    empty = Checksum(hashlib.sha256(b"").digest())
+    for target in ("plain", "text", "checksum", "int"):
+        assert evaluate_expression(empty, "", "bytes", target) == NULL_CHECKSUM
+
+
+def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeypatch):
+    """§Null and conversion legality: sha256(b"null") is not short-circuited; it
+    goes through the executor and the pair's own rule (here X->checksum stores the
+    source checksum's digest, so the result is not null)."""
+    from seamless.checksum import convert as convert_module
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    calls = []
+    original = convert_module.convert_checksum
+
+    def spy(*args, **kwargs):
+        calls.append(args[1:3])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(convert_module, "convert_checksum", spy)
+    get_expression_cache().clear()
+    noncanonical = Checksum(hashlib.sha256(b"null").digest())
+    result = evaluate_expression(noncanonical, "", "plain", "checksum")
+    assert calls == [("plain", "checksum")]
+    assert result != NULL_CHECKSUM
+    assert result == Buffer(noncanonical, "checksum").get_checksum()
+    get_expression_cache().clear()
+
+
+def test_executor_converts_null_by_the_pair_rule_on_a_legal_pair():
+    """§Null and conversion legality: the executor has no null short-circuit of
+    its own for ordinary pairs; contrast with the empty-path Expression."""
+    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+
+    null = Checksum(NULL_CHECKSUM)
+    result_checksum, result_buffer = convert_checksum(
+        null, "plain", "checksum", _fail_if_fetched
+    )
+    assert result_buffer is not None
+    assert result_buffer.content == NULL_CHECKSUM.encode()
+    get_expression_cache().clear()
+    assert evaluate_expression(null, "", "plain", "checksum") == null
+
+
+# --- Deliberate imprecisions (contract) --------------------------------------
+
+
+def test_imprecision_checksum_to_x_is_not_validated_against_x():
+    """§Deliberate imprecisions: checksum->X dereferences without checking that
+    the referenced checksum is deserializable as X."""
+    referenced = Buffer(b"\xff\xfe definitely not json").get_checksum()
+    source = Buffer(referenced, "checksum")
+    for target in ("plain", "int", "python", "bool", "binary"):
+        result = convert_checksum(
+            source.get_checksum(), "checksum", target, lambda: source
+        )
+        assert result == (referenced, None)
+
+
+def test_imprecision_bytes_reading_is_a_buffer_or_empty_bytes_for_null():
+    """§Deliberate imprecisions: a non-null bytes reading is the Buffer object
+    itself, not Python bytes; the null reading is b""."""
+    buffer = Buffer(b"payload")
+    value = _parse_buffer(buffer, buffer.get_checksum(), "bytes")
+    assert isinstance(value, Buffer)
+    assert not isinstance(value, bytes)
+    assert value.content == b"payload"
+    null = Buffer(NULL_BUFFER)
+    assert _parse_buffer(null, null.get_checksum(), "bytes") == b""
+
+
+def test_imprecision_bool_does_not_round_trip_through_str():
+    """§Deliberate imprecisions: reading the true buffer as str gives "True",
+    serializing True as str writes b"true\\n"."""
+    true_buffer = Buffer(True, "str")
+    assert true_buffer.content == b"true\n"
+    assert true_buffer.get_value("str") == "True"
+    assert Buffer("True", "str").content == b'"True"\n'
+    assert Buffer("True", "str").get_checksum() != true_buffer.get_checksum()
+
+
+def test_trivial_checksums_resolve_without_cache_residency():
+    """§Virtual values: TRIVIAL_CHECKSUMS are materialized by Checksum.resolve()
+    without a buffer (b"[]" without newline is never written by a serializer)."""
+    checksum = Checksum(hashlib.sha256(b"[]").digest())
+    assert checksum.resolve("plain") == []
+    checksum = Checksum(hashlib.sha256(b"{}").digest())
+    assert checksum.resolve("plain") == {}
 
 
 def test_engine_result_is_recorded_as_the_empty_path_expression(monkeypatch):
@@ -551,3 +1009,29 @@ def test_engine_result_is_recorded_as_the_empty_path_expression(monkeypatch):
     monkeypatch.setattr(convert_module, "convert_checksum", engine_called)
     assert evaluate_expression(checksum, "", "text", "plain") == first
     get_expression_cache().clear()
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        ("deepfolder", "deepcell"),
+        ("folder", "plain"),
+        ("plain", "deepcell"),
+        ("plain", "deepfolder"),
+        ("plain", "folder"),
+        ("deepcell", "text"),
+        ("text", "folder"),
+        ("deepcell", "mixed"),
+        ("deepfolder", "mixed"),
+        ("checksum", "deepcell"),
+    ],
+)
+def test_rejected_deep_pairs_raise_conversion_error_not_type_error(source, target):
+    """§Celltypes: the engine knows the deep names; an illegal deep pair is a
+    SeamlessConversionError decided from the celltypes alone, never TypeError
+    (contracts/deep-celltypes.md, Zero-path conversions)."""
+    checksum = Checksum("44" * 32)
+    with pytest.raises(SeamlessConversionError) as exc_info:
+        convert_checksum(checksum, source, target, _fail_if_fetched)
+    assert type(exc_info.value) is SeamlessConversionError
+    assert conversion_needs_buffer(checksum, source, target) is False

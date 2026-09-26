@@ -126,14 +126,29 @@ def test_read_uses_completed_dependency_without_starting_it():
         hold.clear()
 
 
-@pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder", "module"])
+@pytest.mark.parametrize("celltype", ["text", "plain", "str", "bytes", "mixed", "float"])
 def test_null_conversion_child_builds_and_evaluates(celltype):
+    """cells.md §Null and None: null short-circuits a legal conversion pair."""
     root = Cell(celltype)
     root.set(None)
     child = root.as_celltype("int")
     assert child.build().compute() == root.checksum
     assert child.checksum == root.checksum
     assert child.value is None
+
+
+# `module` -> `int` is not specified anywhere, so it is pinned neither way.
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
+    "the null checksum short-circuits the illegal conversion and the child reads back NULL"))
+@pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder"])
+def test_null_conversion_child_over_an_illegal_pair_fails(celltype):
+    root = Cell(celltype)
+    root.set(None)
+    child = root.as_celltype("int")
+    assert child.checksum is None
+    assert child.state == "failed"
+    assert isinstance(child.exception, str) and child.exception
 
 
 def test_fingertip_uses_only_the_existing_result(monkeypatch):
