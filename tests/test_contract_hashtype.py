@@ -282,8 +282,7 @@ def test_null_checksum_deserializes_as_all_13_whatever_the_word(kind, null):
 def test_null_deserializability_is_not_convertibility(source, target):
     """§deserializable_as step 1: deserializability, not convertibility. A null checksum
     reads as both ends of every forbidden pair; the pair itself is still forbidden
-    (the conversion half is pinned by the xfail
-    test_null_checksum_does_not_make_a_forbidden_pair_feasible)."""
+    (the conversion half is pinned by the corresponding conversion test)."""
     word = HashType(Kind.JSON_STRING, Length.SHORT)
     for null in BOTH_NULLS:
         assert word.deserializable_as(source, checksum=null) is True
@@ -344,15 +343,6 @@ def test_null_checksum_is_true_on_every_legal_pair(source, target):
             assert conversion_feasible(word, source, target, checksum=null) is True
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "contract ahead of code: hashtype.md §conversion_feasible rule 2 (a forbidden "
-        "pair is False for every checksum, including a null checksum; "
-        "contract-clarity-rulings.md) -- conversion_feasible returns True for a null "
-        "checksum because its null shortcut runs before the forbidden check"
-    ),
-)
 @pytest.mark.parametrize("null", BOTH_NULLS, ids=("null", "null-nl"))
 @pytest.mark.parametrize(
     "source,target", FORBIDDEN_16, ids=[f"{s}->{t}" for s, t in FORBIDDEN_16]

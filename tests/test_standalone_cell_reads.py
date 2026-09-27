@@ -138,9 +138,6 @@ def test_null_conversion_child_builds_and_evaluates(celltype):
 
 
 # `module` -> `int` is not specified anywhere, so it is pinned neither way.
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
-    "the null checksum short-circuits the illegal conversion and the child reads back NULL"))
 @pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder"])
 def test_null_conversion_child_over_an_illegal_pair_fails(celltype):
     root = Cell(celltype)

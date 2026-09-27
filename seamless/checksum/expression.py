@@ -55,7 +55,7 @@ class _ActiveExpression:
     def hold_input(self, checksum):
         from seamless.reference_lifecycle import register_refholder
 
-        checksum.incref_refholder(scratch=True)
+        checksum.incref_refholder(scratch=None)
         self.input_claim = checksum
         register_refholder(self)
 
@@ -152,10 +152,7 @@ def evaluate_expression(
 
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     parse_path(key.path)
-    from .null import is_null
-
-    if key.path or not is_null(key.input_checksum):
-        validate_expression_shape(key.path, key.input_celltype, key.celltype)
+    validate_expression_shape(key.path, key.input_celltype, key.celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
@@ -201,14 +198,11 @@ async def evaluate_expression_async(
     expression_key = ExpressionKey(
         Checksum(input_checksum), path, input_celltype, celltype
     )
-    from .null import is_null
-
-    if expression_key.path or not is_null(expression_key.input_checksum):
-        validate_expression_shape(
-            expression_key.path,
-            expression_key.input_celltype,
-            expression_key.celltype,
-        )
+    validate_expression_shape(
+        expression_key.path,
+        expression_key.input_celltype,
+        expression_key.celltype,
+    )
     key = _cache_key(expression_key)
     from .convert import conversion_needs_buffer
 

@@ -120,13 +120,7 @@ class Expression:
             and ref.validator_language is None
         ):
             ref = ref._input_ref
-        from .checksum.null import is_null
-        if not path and isinstance(ref, Checksum) and is_null(ref):
-            from .buffer_class import Buffer
-            Buffer._map_celltype(self.input_celltype)
-            Buffer._map_celltype(celltype)
-        else:
-            validate_expression_shape(path, self.input_celltype, celltype)
+        validate_expression_shape(path, self.input_celltype, celltype)
         if (
             isinstance(ref, Expression)
             and ref.validator is None
@@ -312,6 +306,31 @@ class Expression:
             validator_language=self.validator_language,
             materialize=not scratch,
         )
+        try:
+            from seamless_remote import database_remote
+        except ImportError:
+            pass
+        else:
+            try:
+                write = database_remote.set_expression_result(
+                    input_checksum,
+                    self.path,
+                    self.input_celltype,
+                    self.celltype,
+                    result,
+                )
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(write)
+                else:
+                    from .checksum_class import _run_coro_in_worker_thread
+
+                    _run_coro_in_worker_thread(write)
+            except Exception:
+                # Local evaluation remains authoritative when the optional
+                # expression database is unavailable or rejects the write.
+                pass
         return self._publish_result(result)
 
     async def _evaluate_internal_async(

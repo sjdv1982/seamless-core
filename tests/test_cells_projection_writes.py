@@ -357,10 +357,6 @@ def _deep_root(celltype, members):
     return Cell(celltype, checksum=index.get_checksum()), holds
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
-    "the write resolves the checksum to its value and inserts the value into the index, which then fails "
-    "validation ('Deep member 'k' must be a lowercase checksum')"))
 @pytest.mark.parametrize("form", ["checksum", "set_checksum"])
 def test_member_checksum_write_replaces_the_index_entry(form):
     """At the one-step key k of a deep parent, the member checksum replaces index[k]."""
@@ -381,10 +377,6 @@ def test_member_checksum_write_replaces_the_index_entry(form):
             hold.clear()
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
-    "the value is inserted into the index as a value instead of as its member-celltype checksum "
-    "(deepcell: 'Deep member 'k' is nested'; deepfolder/folder: 'Type is not JSON serializable: Buffer')"))
 @pytest.mark.parametrize("celltype, value", [
     ("deepcell", {"x": 5}), ("deepfolder", b"file bytes"), ("folder", b"folder bytes"),
 ])
@@ -402,9 +394,6 @@ def test_member_value_write_is_serialized_at_the_member_celltype(celltype, value
             hold.clear()
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Writes through a handle / clarity ruling (writes below a deep parent): contract ahead of code: "
-    "the buffer is parsed and its value inserted into the index instead of its member checksum"))
 @pytest.mark.parametrize("form", ["buffer", "set_buffer"])
 @pytest.mark.parametrize("celltype, value", [("deepcell", {"x": 5}), ("folder", b"folder bytes")])
 def test_member_buffer_write_inserts_the_buffer_checksum(form, celltype, value):

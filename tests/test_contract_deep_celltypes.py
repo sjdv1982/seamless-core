@@ -253,14 +253,6 @@ def test_cell_buffer_at_deep_celltype_validates_at_the_mapped_celltype(celltype)
         cell.buffer
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §When flatness is checked (row 'reading .value / .buffer at a deep "
-    "celltype': flatness checked = yes): contract ahead of code, and NOT listed under "
-    "§Implementation status: CellBase.buffer validates only at the mapped celltype (plain), "
-    "so a nested index is returned without error. The doc is internally inconsistent here: "
-    "§What a deep buffer is and cells.md describe .buffer as mapped-celltype validation only",
-)
 @pytest.mark.parametrize("celltype", DEEP)
 def test_cell_buffer_at_deep_celltype_rejects_a_nested_index(celltype):
     nested = _held({"n": {"x": "aa" * 32}}, "plain")
@@ -419,22 +411,12 @@ def test_non_empty_folder_to_mixed_to_plain_is_rejected(content):
 
 # --- Writes through a handle one step below a deep parent (cells.md, Writes through a handle) ---
 
-_DEEP_HANDLE_WRITE_GAP = pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Standalone writes at k insert the value, "
-    "not the member checksum): contract ahead of code: a checksum/buffer write through d['k'] "
-    "must put the member checksum in index[k]; the code inserts the resolved value "
-    "(deepcell: index becomes nested) or fails to serialize a Buffer (deepfolder/folder)",
-)
-
-
 def _member_buffer(celltype):
     if celltype == "deepcell":
         return _held({"v": "new deep member"}, "mixed")
     return _held(b"new folder member bytes")
 
 
-@_DEEP_HANDLE_WRITE_GAP
 @pytest.mark.parametrize("form", ["checksum", "set_checksum", "buffer", "set_buffer"])
 @pytest.mark.parametrize("celltype", DEEP)
 def test_handle_write_below_a_deep_parent_replaces_the_member_checksum(celltype, form):
@@ -465,13 +447,6 @@ def test_handle_checksum_write_below_a_deep_parent_with_absent_buffer_records_no
 
 # --- Null on illegal deep pairs; value writes and writes below k ------------
 
-_NULL_ILLEGAL_GAP = pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Null passes illegal deep pairs, at "
-    "construction and in the engine; §Zero-path conversions): contract ahead of code: a null checksum is short-circuited before the deep "
-    "legality check, so an illegal deep pair is accepted and returns null",
-)
-
 ILLEGAL_DEEP_PAIRS = [
     ("deepfolder", "deepcell"),
     ("folder", "plain"),
@@ -482,7 +457,6 @@ ILLEGAL_DEEP_PAIRS = [
 ]
 
 
-@_NULL_ILLEGAL_GAP
 @pytest.mark.parametrize("source,target", ILLEGAL_DEEP_PAIRS)
 def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_at_construction(source, target):
     null = _held(None, "plain")
@@ -490,7 +464,6 @@ def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_at_construction(
         Expression(null.get_checksum(), input_celltype=source, celltype=target)
 
 
-@_NULL_ILLEGAL_GAP
 @pytest.mark.parametrize("source,target", ILLEGAL_DEEP_PAIRS)
 def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_in_the_engine(source, target):
     null = _held(None, "plain")
@@ -502,17 +475,6 @@ def test_null_checksum_does_not_make_an_illegal_deep_pair_legal_in_the_engine(so
         convert_checksum(null.get_checksum(), source, target, fail)
 
 
-_VALUE_WRITE_GAP = pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Standalone writes at k insert the value, "
-    "not the member checksum; §Handles and writes: a value write at k serializes v at the "
-    "member celltype and its checksum replaces index[k]): contract ahead of code: deepcell inserts "
-    "the value itself (index becomes nested); deepfolder/folder fail with 'Type is not JSON "
-    "serializable: Buffer'",
-)
-
-
-@_VALUE_WRITE_GAP
 @pytest.mark.parametrize("celltype", DEEP)
 def test_value_write_at_k_inserts_the_member_checksum(celltype):
     old = _held({"v": "old"}, "mixed") if celltype == "deepcell" else _held(b"old bytes")

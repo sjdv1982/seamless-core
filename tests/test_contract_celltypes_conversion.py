@@ -82,13 +82,6 @@ def test_module_is_not_a_conversion_celltype(position):
         convert_checksum(Checksum("44" * 32), source, target, _fail_if_fetched)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §Celltypes, 'What each component accepts': contract ahead of "
-    "code: conversion_needs_buffer swallows the TypeError of convert_checksum and "
-    "returns False for a celltype outside the engine (gap not yet listed under "
-    "Implementation status)",
-)
 @pytest.mark.parametrize("name", ["module", "not-a-celltype"])
 @pytest.mark.parametrize("position", ["source", "target"])
 def test_conversion_needs_buffer_rejects_celltypes_outside_the_engine(position, name):
@@ -768,22 +761,12 @@ def test_engine_refuses_null_on_every_forbidden_pair(source, target, null):
         convert_checksum(null, source, target, _fail_if_fetched)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=_NULL_CONTRACT + "Expression construction accepts the canonical null "
-    "on a forbidden pair (a non-null or non-canonical null checksum is refused)",
-)
 @pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
 def test_expression_construction_refuses_null_on_every_forbidden_pair(source, target):
     with pytest.raises(ValueError):
         Expression(Checksum(NULL_CHECKSUM), input_celltype=source, celltype=target)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=_NULL_CONTRACT + "empty-path evaluation returns NULL for a canonical "
-    "null input on a forbidden pair",
-)
 @pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
 def test_empty_path_evaluation_refuses_null_on_every_forbidden_pair(source, target):
     from seamless.checksum.expression import evaluate_expression, get_expression_cache
@@ -807,11 +790,6 @@ _ILLEGAL_DEEP_PAIRS = [
 ]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=_NULL_CONTRACT + "convert_checksum returns (null, None) for either "
-    "null form on an illegal deep pair",
-)
 @pytest.mark.parametrize("null", _NULL_FORMS)
 @pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
 def test_engine_refuses_null_on_illegal_deep_pairs(source, target, null):
@@ -819,22 +797,12 @@ def test_engine_refuses_null_on_illegal_deep_pairs(source, target, null):
         convert_checksum(null, source, target, _fail_if_fetched)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=_NULL_CONTRACT + "Expression construction accepts the canonical null "
-    "on an illegal deep pair",
-)
 @pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
 def test_expression_refuses_null_on_illegal_deep_pairs(source, target):
     with pytest.raises(ValueError):
         Expression(Checksum(NULL_CHECKSUM), input_celltype=source, celltype=target)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=_NULL_CONTRACT + "empty-path evaluation returns NULL for a canonical "
-    "null input on an illegal deep pair",
-)
 @pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
 def test_empty_path_evaluation_refuses_null_on_illegal_deep_pairs(source, target):
     from seamless.checksum.expression import evaluate_expression, get_expression_cache
