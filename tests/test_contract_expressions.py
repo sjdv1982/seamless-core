@@ -521,13 +521,6 @@ def test_database_key_conflict_raises_nothing_and_the_evaluation_keeps_its_resul
     assert direct is False
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="expressions.md, Results and caching / Evaluating, recording identity and "
-    "publishing: contract ahead of code: evaluate_expression_async (the local-only "
-    "evaluator behind execution='local') records the result in the process cache "
-    "only; only evaluate_expression_remote writes the database expression row",
-)
 def test_explicit_local_evaluation_also_records_identity_in_the_database(monkeypatch):
     """expressions.md, Results and caching: successful results are recorded in the
     process cache and, when seamless_remote is importable, in the database

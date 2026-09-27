@@ -189,6 +189,8 @@ class CellBase:
             validate_deserializable_as(checksum, celltype)
             buffer = checksum.resolve()
             validate_deserializable_as(checksum, celltype, buffer=buffer)
+            if self.celltype in ("deepcell", "deepfolder", "folder"):
+                buffer.get_value(self.celltype)
             return buffer
         except Exception as exc:
             return self._handle_materialization_error(exc)
@@ -717,31 +719,25 @@ class Cell(CellBase):
         if self._workflow_backend is not None:
             return type(self)._from_backend(self._workflow_backend)
         from .checksum_class import Checksum
+        from .reference_lifecycle import register_refholder
 
-        ref = self._input_ref
-        kwargs = {
-            "celltype": self.celltype,
-            "validator": self.validator,
-            "validator_language": self.validator_language,
-        }
-        if ref is None or isinstance(ref, Checksum):
-            kwargs["checksum"] = ref
-        else:
-            kwargs["source"] = ref
-        if self.input_celltype is not None:
-            kwargs["input_celltype"] = self.input_celltype
-        duplicate = type(self)(**kwargs)
-        duplicate._path = self._path
-        duplicate._path_component = self._path_component
-        duplicate._conversion_link = self._conversion_link
-        duplicate._scratch = self._scratch
-        duplicate._standalone_exception = self._standalone_exception
-        duplicate._standalone_recipe_key = self._standalone_recipe_key
-        duplicate._standalone_expression = self._standalone_expression
-        if self._standalone_result_checksum is not None:
+        duplicate = type(self).__new__(type(self))
+        for name in (
+            "_workflow_backend", "_standalone_input_ref", "_input_celltype",
+            "_celltype", "_standalone_exception", "_standalone_recipe_key",
+            "_standalone_expression", "_path", "_path_component",
+            "_conversion_link", "_validator", "_validator_language", "_scratch",
+        ):
+            object.__setattr__(duplicate, name, getattr(self, name))
+        object.__setattr__(duplicate, "_standalone_result_checksum", None)
+        object.__setattr__(duplicate, "_refholds_released", False)
+        if isinstance(duplicate._input_ref, Checksum) and not self._refholds_released:
+            duplicate._input_ref.incref_refholder()
+        if self._standalone_result_checksum is not None and not self._refholds_released:
             duplicate._set_result_checksum(self._standalone_result_checksum)
-        if self._refholds_released:
-            duplicate._release_refholds()
+        else:
+            object.__setattr__(duplicate, "_refholds_released", self._refholds_released)
+        register_refholder(duplicate)
         return duplicate
 
     def __deepcopy__(self, memo):
@@ -937,7 +933,10 @@ class Cell(CellBase):
             )
         target._check_write_authority(False)
         checksum = _serialize_value(value, self.celltype)
-        self._standalone_commit(target, path, checksum.resolve(self.celltype))
+        if target.celltype in ("deepcell", "deepfolder", "folder"):
+            self._standalone_commit(target, path, checksum)
+        else:
+            self._standalone_commit(target, path, checksum.resolve(self.celltype))
 
     def _standalone_write_checksum(self, checksum, *, input_celltype=None):
         target, path, conversion = self._standalone_write_info()
@@ -951,7 +950,10 @@ class Cell(CellBase):
                 "A projection has no input to clear; use .value = None or del on the parent"
             )
         from .checksum_class import Checksum
-        value = Checksum(checksum).resolve(input_celltype or self.celltype)
+        checksum = Checksum(checksum)
+        value = checksum.resolve(input_celltype or self.celltype)
+        if target.celltype in ("deepcell", "deepfolder", "folder"):
+            value = checksum
         self._standalone_commit(target, path, value)
 
     def _standalone_write_buffer(self, buffer):
@@ -966,7 +968,11 @@ class Cell(CellBase):
                 "A projection has no input to clear; use .value = None or del on the parent"
             )
         checksum = _checksum_for_buffer(buffer, self.celltype)
-        value = checksum.resolve(self.celltype)
+        value = (
+            checksum
+            if target.celltype in ("deepcell", "deepfolder", "folder")
+            else checksum.resolve(self.celltype)
+        )
         self._standalone_commit(target, path, value)
 
     def _standalone_delete(self, *, extra_path=()):
@@ -1083,7 +1089,7 @@ def _available_input_checksum(value):
         return value
     if isinstance(value, Expression):
         if isinstance(value._input_ref, Checksum):
-            return value.compute()
+            return value._evaluate_internal(execution="auto")
         checksum = _available_input_checksum(value._input_ref)
         if checksum is None:
             return None
@@ -1094,8 +1100,10 @@ def _available_input_checksum(value):
             celltype=value.celltype, validator=value.validator,
             validator_language=value.validator_language,
         )
-        result = concrete.compute()
-        value._enable_result_holding()
+        try:
+            result = concrete.compute()
+        finally:
+            concrete._release_refholds()
         return value._publish_result(result) if result is not None else None
     if isinstance(value, Cell):
         return value.checksum
@@ -1134,7 +1142,25 @@ def _checksum_for_buffer(value, celltype):
 
 def _check_projected_source(source, celltype):
     if isinstance(source, (Cell, Expression)) and source.path and source.celltype != celltype:
-        raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
+        path = source.path
+        if path.startswith("[") and path.endswith("]"):
+            item = path[1:-1]
+            projection = (
+                f'  …{path}.as_celltype("{celltype}") '
+                f"# item {item} of the {source.celltype} (a character), as {celltype}"
+            )
+            conversion = (
+                f'  ….as_celltype("{celltype}"){path} '
+                f"# item {item} of the parsed list"
+            )
+            raise TypeError(
+                f"would convert {source.celltype} -> {celltype} behind a projection.\n"
+                f"{projection}\n{conversion}"
+            )
+        raise TypeError(
+            "Cannot implicitly convert behind a projection; use as_celltype() "
+            "before or after projecting"
+        )
 
 
 def _cell_recipe_key(cell):

@@ -243,23 +243,23 @@ def conversion_feasible(
     for celltype in (source_celltype, target_celltype):
         if celltype not in HASH_TYPE_CELLTYPES:
             raise ValueError(f"celltype is outside the HashType domain: {celltype!r}")
+    if source_celltype == target_celltype:
+        return True
+    conv = (source_celltype, target_celltype)
+    conv = conversion_equivalent.get(conv, conv)
+    if conv in conversion_forbidden:
+        return False
     if is_null_value(checksum):
         return True
     hash_type = hash_type if isinstance(hash_type, HashType) else HashType.unpack(hash_type)
-    if source_celltype == target_celltype:
-        return True
     if hash_type.deserializable_as(source_celltype, checksum=checksum) is False:
         return False
     if target_celltype == "checksum":
         return True
-    conv = (source_celltype, target_celltype)
-    conv = conversion_equivalent.get(conv, conv)
     if conv in conversion_chain:
         return _chain_conversion_feasible(
             hash_type, source_celltype, target_celltype, checksum=checksum
         )
-    if conv in conversion_forbidden:
-        return False
     if conv in conversion_trivial or conv in conversion_reformat:
         return True
     if conv in conversion_reinterpret:

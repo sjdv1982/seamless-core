@@ -291,14 +291,6 @@ def test_copied_refholder_owns_an_independent_reference(make, copier):
         original._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="checksum-reference-lifecycle.md §5 (copying a Cell creates an independent "
-    "reference; §10 lists the copy defect as fixed): contract ahead of code: "
-    "Cell.__copy__ rebuilds a projected-then-converted Cell through Cell(source=..., "
-    "celltype=..., input_celltype=...), which trips _check_projected_source and raises "
-    "TypeError('Cannot implicitly convert behind a projection')",
-)
 @pytest.mark.parametrize("copier", [copy.copy, copy.deepcopy], ids=["copy", "deepcopy"])
 def test_copy_of_a_converted_projection_owns_an_independent_reference(copier):
     root = Cell("plain")

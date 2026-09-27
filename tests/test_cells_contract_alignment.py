@@ -607,9 +607,6 @@ def test_null_retype_keeps_checksum(world, celltype):
 
 
 # `module` -> `int` is not specified anywhere, so it is pinned neither way.
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
-    "the null checksum short-circuits the illegal conversion and the cell reports a complete NULL"))
 @pytest.mark.parametrize("celltype", _NULL_ILLEGAL_TO_INT)
 def test_null_retype_over_an_illegal_pair_fails(world, celltype):
     cell = world.make(celltype)

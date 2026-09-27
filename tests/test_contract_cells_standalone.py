@@ -263,9 +263,6 @@ def test_running_loop_refusal_leaves_state_waiting(monkeypatch):
 
 # --- Ruling 8: the wiring refusal text is contract ------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Connecting / ruling 8: contract ahead of code: the refusal says 'Cannot implicitly convert "
-    "behind a projection; use as_celltype() before or after projecting' instead of the two-spelling message"))
 @pytest.mark.parametrize("api", ["constructor", "with_input"])
 def test_wiring_refusal_message_names_both_spellings(api):
     """cells.md §Connecting: header line, then the two spellings (projection first), each glossed.
@@ -349,9 +346,6 @@ def test_a_64_character_str_is_always_a_value():
 
 # --- Null and None: null only on legal pairs ------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of "
-    "code: a standalone null as_celltype child over an illegal pair reads back a complete NULL"))
 @pytest.mark.parametrize("celltype", ["python", "ipython", "deepcell", "deepfolder", "folder"])
 def test_null_as_celltype_child_over_an_illegal_pair_fails(celltype):
     parent = Cell(celltype)

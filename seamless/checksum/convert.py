@@ -90,6 +90,20 @@ def convert_checksum(
     try:
         from .null import is_null_value
 
+        if (source, target) in conversion_forbidden:
+            raise SeamlessConversionError(
+                f"{checksum.hex()} cannot be converted from {source} to {target}"
+            )
+        if source in _DEEP_CELLTYPES or target in _DEEP_CELLTYPES:
+            legal_deep_pair = (
+                source == target
+                or (source, target) in _DEEP_FREE_CONVERSIONS
+                or (source, target) == ("folder", "mixed")
+            )
+            if not legal_deep_pair:
+                raise SeamlessConversionError(
+                    f"{checksum.hex()} cannot be converted from {source} to {target}"
+                )
         if is_null_value(checksum) and (
             source in _DEEP_CELLTYPES or target in _DEEP_CELLTYPES
         ):
@@ -130,6 +144,12 @@ def conversion_needs_buffer(
     is not a buffer-requiring conversion.  Its failure is intentionally
     treated as local by expression location selection.
     """
+
+    known_celltypes = set(celltypes) | _DEEP_CELLTYPES
+    if source not in known_celltypes:
+        raise TypeError(source)
+    if target not in known_celltypes:
+        raise TypeError(target)
 
     def needs_buffer() -> Buffer:
         raise _NeedsBuffer
