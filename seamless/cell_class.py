@@ -179,8 +179,6 @@ class CellBase:
             return self._workflow_backend.buffer
         checksum = self.checksum
         if checksum is None:
-            if self._standalone_exception is not None:
-                raise self._standalone_exception
             return None
         try:
             from .checksum.hash_type_validation import validate_deserializable_as
@@ -205,8 +203,6 @@ class CellBase:
             return self._workflow_backend.value
         checksum = self.checksum
         if checksum is None:
-            if self._standalone_exception is not None:
-                raise self._standalone_exception
             return None
         try:
             value = checksum.resolve(self.celltype)
@@ -254,12 +250,7 @@ class CellBase:
         return self._workflow_backend.clear_exception()
 
     def _handle_materialization_error(self, exc):
-        from . import CacheMissError
-        if isinstance(exc, CacheMissError):
-            raise exc
-        from .error_envelope import execution_error
-        self._standalone_exception = execution_error(exc)
-        raise self._standalone_exception
+        raise exc
 
     def _check_write_authority(self, detach):
         if self._path:
@@ -370,6 +361,16 @@ class CellBase:
         self._sync_recipe()
         if self._miswired():
             return None
+        from .checksum_class import Checksum
+        if (
+            isinstance(self._input_ref, Checksum)
+            and not self._path
+            and self.input_celltype == self.celltype
+            and self._validator is None
+        ):
+            checksum = self.checksum
+            if checksum is not None:
+                return checksum
         try:
             self._standalone_expression = self.build(input_ref)
             result = self._standalone_expression._compute_for_owner(
