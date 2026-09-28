@@ -217,9 +217,13 @@ def test_cell_value_at_deep_celltype_rejects_a_flat_non_index(celltype):
     buffer = _held({"k": "hello"}, "plain")
     cell = Cell(celltype, checksum=buffer.get_checksum())
     cell.compute()
-    with pytest.raises(Exception):
-        cell.value
-    assert cell.exception is not None
+    # A read that fails to materialize an existing result raises, every time,
+    # and records nothing (contracts/cells.md, ruled 2026-09-28).
+    for _ in range(2):
+        with pytest.raises(Exception):
+            cell.value
+        assert cell.exception is None
+        assert cell.state == "complete"
 
 
 @pytest.mark.parametrize("celltype", DEEP)
@@ -227,9 +231,11 @@ def test_cell_value_at_deep_celltype_rejects_a_nested_index(celltype):
     buffer = _held({"n": {"x": "aa" * 32}}, "plain")
     cell = Cell(celltype, checksum=buffer.get_checksum())
     cell.compute()
-    with pytest.raises(Exception, match="nested"):
-        cell.value
-    assert "nested" in cell.exception
+    for _ in range(2):
+        with pytest.raises(Exception, match="nested"):
+            cell.value
+        assert cell.exception is None
+        assert cell.state == "complete"
 
 
 @pytest.mark.parametrize("celltype", DEEP)
