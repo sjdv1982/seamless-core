@@ -2,8 +2,10 @@
 
 Review decisions §3.2 item 7: such an expression is not invalid. It
 deterministically returns its result checksum, which stays stored; reading the
-value fails, and fails the same way every time. A Cell built on it is `failed`,
-and `clear_exception()` reproduces the failure (§8.4).
+value fails, and fails the same way every time. A Cell built on it stays
+`complete`: every read of its value raises, and nothing is recorded
+(contracts/cells.md, `.buffer` and `.value`, ruled 2026-09-28; this supersedes
+the recorded `failed` state of §8.4).
 
 Only the text celltypes (python, ipython, yaml) reach this: their validity is
 checked at parse time, outside HashType. For the other celltypes, serializing
@@ -79,7 +81,7 @@ def test_reevaluation_returns_the_same_valid_checksum(input_celltype, value, pat
 
 
 @pytest.mark.parametrize("input_celltype,value,path,celltype,text", CASES)
-def test_standalone_cell_fails_and_clear_exception_reproduces(input_celltype, value, path, celltype, text):
+def test_standalone_cell_stays_complete_and_every_read_raises(input_celltype, value, path, celltype, text):
     expression = _expression(input_celltype, value, path, celltype)
     cell = Cell(celltype, source=expression)
     result = cell.compute()
@@ -88,7 +90,9 @@ def test_standalone_cell_fails_and_clear_exception_reproduces(input_celltype, va
     for _ in range(2):
         with pytest.raises(HashTypeValidationError):
             cell.value
-        assert cell.state == "failed"
-        assert cell.exception is not None
+        assert cell.state == "complete"
+        assert cell.exception is None
+        assert cell.checksum == result
         assert get_expression_cache()[_cache_key(expression)] == result
-        cell.clear_exception()
+    with pytest.raises(HashTypeValidationError):
+        cell.run()
