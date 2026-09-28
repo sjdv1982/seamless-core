@@ -351,6 +351,10 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
         task = loop.create_task(_process_entry(entry))
         pending.add(task)
         task.add_done_callback(_on_done)
+        # Drop the loop's own references while awaiting the next entry: the
+        # last processed entry would otherwise keep its Buffer alive, and so
+        # resolvable, without any claim on its checksum.
+        entry = task = None
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
 
