@@ -504,6 +504,7 @@ class Cell(CellBase):
         if checksum is not _UNSET and source is not _UNSET:
             raise TypeError("checksum and source are mutually exclusive inputs")
         if source is not _UNSET:
+            _validate_workflow_source(source)
             if source is not None and (isinstance(source, Checksum) or not _is_input_ref(source)):
                 raise TypeError("source must be a typed reference; use checksum= for a checksum")
             ref = source
@@ -790,6 +791,14 @@ class Cell(CellBase):
             return self
         return backend.capture_source()
 
+    def _workflow_validate_source(self):
+        backend = self._workflow_backend
+        if backend is None:
+            return
+        validate = getattr(backend, "_workflow_validate_source", None)
+        if callable(validate):
+            validate()
+
     def __getitem__(self, item: Any) -> "Cell":
         if isinstance(item, slice):
             return self.slice(item.start, item.stop, item.step)
@@ -1068,6 +1077,13 @@ def _serialize_value(value: Any, input_celltype: str):
     # The tempref keeps the buffer resolvable until the Cell's refhold adopts it.
     buffer.tempref()
     return buffer.get_checksum()
+
+
+def _validate_workflow_source(value: Any) -> None:
+    # Keep construction-time checks structural: resolving a checksum belongs to build().
+    validate = getattr(value, "_workflow_validate_source", None)
+    if callable(validate):
+        validate()
 
 
 def _capture_workflow_source(value: Any) -> Any:
