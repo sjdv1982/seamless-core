@@ -354,3 +354,11 @@ def test_null_as_celltype_child_over_an_illegal_pair_fails(celltype):
     assert child.checksum is None
     assert child.state == "failed"
     assert isinstance(child.exception, str) and child.exception
+
+
+def test_standalone_mount_error_explains_bound_requirement():
+    with pytest.raises(
+        AttributeError,
+        match="^mount is only available for bound workflow cells$",
+    ):
+        Cell().mount("x")

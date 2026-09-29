@@ -808,6 +808,13 @@ class Cell(CellBase):
         check_retired_name(name)
         if name.startswith("_"):
             raise AttributeError(name)
+        if name == "mount":
+            try:
+                backend = object.__getattribute__(self, "_workflow_backend")
+            except AttributeError:
+                backend = None
+            if backend is None:
+                raise AttributeError("mount is only available for bound workflow cells")
         # A class-defined API member is authoritative even when its getter raises
         # a deliberate bound-only AttributeError.  Only genuinely unknown names
         # participate in structural projection.
