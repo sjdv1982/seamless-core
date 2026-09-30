@@ -418,7 +418,13 @@ def from_buffer(
             return HashType(Kind.RAW_BYTES, length)
         return HashType(Kind.NUMPY, length, dtype, rank, flags)
     if raw.startswith(_magic_seamless_mixed()):
-        return HashType(_mixed_kind(raw), length)
+        try:
+            kind = _mixed_kind(raw)
+        except (IndexError, ValueError, AttributeError, TypeError):
+            # As for NPY: a magic prefix alone does not make arbitrary bytes a
+            # Seamless-mixed buffer, and every buffer must remain classifiable.
+            return HashType(Kind.RAW_BYTES, length)
+        return HashType(kind, length)
 
     try:
         text = raw.decode()
@@ -480,7 +486,12 @@ def deserializable_as(
     if celltype == "binary":
         return kind == Kind.NUMPY
     if celltype == "mixed":
-        return kind not in (Kind.RAW_BYTES, Kind.RAW_TEXT)
+        if kind in (Kind.RAW_BYTES, Kind.RAW_TEXT):
+            return False
+        if ti.is_mixed:
+            # The producer reads only the Seamless-mixed header, not the payload.
+            return None
+        return True
     if celltype == "checksum":
         # A digest of only decimal digits is also a JSON number.
         return kind in (Kind.RAW_TEXT, Kind.JSON_NUMBER) and ti.length == Length.EQ64

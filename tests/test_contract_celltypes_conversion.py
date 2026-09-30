@@ -24,7 +24,7 @@ from seamless.checksum.null import NULL_BUFFER, NULL_CHECKSUM
 from seamless.checksum.parse_buffer import _parse_buffer
 from seamless.checksum.serialize import _serialize
 from seamless.checksum.virtual import virtual_value
-from seamless.util.mixed import MAGIC_NUMPY
+from seamless.util.mixed import MAGIC_NUMPY, MAGIC_SEAMLESS_MIXED
 
 DOC = "celltypes-and-conversion.md"
 
@@ -562,14 +562,63 @@ def test_bytes_to_mixed_utf8_strips_trailing_newlines():
     assert result_checksum == Buffer("hello", "str").get_checksum()
 
 
-def test_bytes_to_binary_rejects_a_coincidental_npy_magic():
-    """§Reformat rules, bytes->binary: .npy magic is validated as binary."""
-    raw = MAGIC_NUMPY + b"garbage"
-    checksum = Checksum(hashlib.sha256(raw).digest())
+@pytest.mark.parametrize("cached_word", [True, False], ids=["cached-word", "no-word"])
+def test_bytes_to_binary_wraps_a_coincidental_npy_magic(cached_word):
+    """§Reformat rules, bytes->binary: .npy magic is validated as binary, and a
+    corrupt payload behind it is wrapped as a dtype-S .npy, like any other
+    bytes, whether or not its (RAW_BYTES) word is cached."""
+    raw = MAGIC_NUMPY + (b"garbage" if cached_word else b"rubbish")
+    if cached_word:
+        checksum = Buffer(raw).get_checksum()
+    else:
+        checksum = Checksum(hashlib.sha256(raw).digest())
     get_buffer, calls = _counting_getter(raw)
-    with pytest.raises(SeamlessConversionError):
-        convert_checksum(checksum, "bytes", "binary", get_buffer)
+    result_checksum, result_buffer = convert_checksum(checksum, "bytes", "binary", get_buffer)
+    expected = Buffer(np.array(raw), "binary")
+    assert (result_checksum, result_buffer.content) == (expected.get_checksum(), expected.content)
     assert calls == [None]
+
+
+def _seamless_mixed_raw():
+    raw = Buffer({"a": np.arange(5), "b": "x"}, "mixed").content
+    assert raw.startswith(MAGIC_SEAMLESS_MIXED)
+    return raw
+
+
+@pytest.mark.parametrize("cached_word", [True, False], ids=["cached-word", "no-word"])
+def test_bytes_to_mixed_wraps_a_truncated_seamless_mixed_buffer(cached_word):
+    """§Reformat rules, bytes->mixed: a Seamless-mixed word is not a proof, so a
+    corrupt payload behind the magic is never kept; like any non-UTF-8 bytes it
+    becomes a dtype-S .npy, whether or not its word is cached."""
+    # Distinct truncations, so that the no-word case finds no cached word.
+    raw = _seamless_mixed_raw()[: -7 if cached_word else -9]
+    if cached_word:
+        checksum = Buffer(raw).get_checksum()  # registers the MIXED_OBJECT word
+    else:
+        checksum = Checksum(hashlib.sha256(raw).digest())
+    get_buffer, calls = _counting_getter(raw)
+    result_checksum, result_buffer = convert_checksum(checksum, "bytes", "mixed", get_buffer)
+    expected = Buffer(np.array(raw), "binary")
+    assert (result_checksum, result_buffer.content) == (expected.get_checksum(), expected.content)
+    assert calls == [None]
+
+
+def test_bytes_to_mixed_keeps_a_valid_seamless_mixed_buffer_after_fetching():
+    """§Reformat rules, bytes->mixed: a valid Seamless-mixed buffer is kept, but
+    its cached word does not skip the fetch."""
+    buffer = Buffer(_seamless_mixed_raw())
+    checksum = buffer.get_checksum()
+    assert conversion_needs_buffer(checksum, "bytes", "mixed") is True
+    get_buffer, calls = _counting_getter(buffer)
+    assert convert_checksum(checksum, "bytes", "mixed", get_buffer) == (checksum, None)
+    assert calls == [None]
+
+
+def test_truncated_seamless_mixed_buffer_read_as_mixed_is_a_value_error():
+    """§Reference parser, exception classes: a corrupt Seamless-mixed payload
+    is a ValueError, not the format internals' AssertionError."""
+    with pytest.raises(ValueError):
+        _parse(_seamless_mixed_raw()[:-11], "mixed")
 
 
 @pytest.mark.parametrize("source", ["binary", "mixed"])

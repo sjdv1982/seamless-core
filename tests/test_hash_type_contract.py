@@ -146,8 +146,6 @@ CONCRETE_DESERIALIZATION = {
     "binary": {"numpy"},
     "mixed": {
         "numpy",
-        "mixed-object",
-        "mixed-array",
         "json-object",
         "json-array",
         "json-string",
@@ -157,6 +155,12 @@ CONCRETE_DESERIALIZATION = {
     "bool": set(),
 }
 
+# Concrete words that neither prove nor disprove a reading: None.
+CONCRETE_UNKNOWN = {
+    # The producer reads only the Seamless-mixed header.
+    "mixed": {"mixed-object", "mixed-array"},
+}
+
 
 @pytest.mark.parametrize("celltype", CELLTYPES)
 @pytest.mark.parametrize("word_name", CONCRETE_WORDS)
@@ -164,7 +168,10 @@ def test_concrete_deserializable_as_matrix(word_name, celltype):
     result = deserializable_as(
         CONCRETE_WORDS[word_name], celltype, checksum=CHECKSUM
     )
-    assert result is (word_name in CONCRETE_DESERIALIZATION[celltype])
+    if word_name in CONCRETE_UNKNOWN.get(celltype, ()):
+        assert result is None
+    else:
+        assert result is (word_name in CONCRETE_DESERIALIZATION[celltype])
 
 
 @pytest.mark.parametrize("raw", (b"true", b"true\n", b"false", b"false\n"))
