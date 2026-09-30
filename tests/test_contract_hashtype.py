@@ -229,15 +229,39 @@ def test_json_numbers_are_json_number_with_numeric_scalar(raw):
     assert word.flags == Flag.NUMERIC_SCALAR
 
 
-def test_mixed_form_with_other_root_type_raises_value_error():
-    """§Producer step 2: any mixed root type other than object/array raises."""
-    form = json.dumps({"type": "string"}).encode()
-    raw = (
+def _mixed_header(form: dict) -> bytes:
+    encoded = json.dumps(form).encode()
+    return (
         MAGIC_SEAMLESS_MIXED + bytes([4]) + b"pure"
-        + len(form).to_bytes(4, "little") + form
+        + len(encoded).to_bytes(4, "little") + encoded
     )
-    with pytest.raises(ValueError):
-        from_buffer(raw)
+
+
+MALFORMED_MIXED_MAGIC = [
+    ("magic-only", MAGIC_SEAMLESS_MIXED),
+    ("junk-header", MAGIC_SEAMLESS_MIXED + b"\x05abc"),
+    ("other-root-type", _mixed_header({"type": "string"})),
+    ("non-object-form", _mixed_header(["object"])),
+]
+
+
+@pytest.mark.parametrize(
+    "raw", [c[1] for c in MALFORMED_MIXED_MAGIC], ids=[c[0] for c in MALFORMED_MIXED_MAGIC]
+)
+def test_malformed_mixed_magic_is_raw_bytes_and_has_a_checksum(raw):
+    """§Producer step 2: a Seamless-mixed magic whose header does not give an
+    object/array root is RAW_BYTES, as for a malformed .npy; the buffer still
+    gets a checksum."""
+    assert from_buffer(raw).kind == Kind.RAW_BYTES
+    checksum = Buffer(raw).get_checksum()
+    assert checksum.hex() == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize("kind", (Kind.MIXED_OBJECT, Kind.MIXED_ARRAY))
+def test_seamless_mixed_word_does_not_prove_mixed(kind):
+    """§deserializable_as, concrete `mixed`: the producer read only the header,
+    so a Seamless-mixed word answers None, never True."""
+    assert deserializable_as(HashType(kind, Length.MEDIUM), "mixed", checksum=CHECKSUM) is None
 
 
 def test_producer_never_emits_untested_kinds():

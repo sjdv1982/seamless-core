@@ -288,8 +288,14 @@ def _bytes_to_binary(
 
     if buffer.content.startswith(MAGIC_NUMPY):
         # Do not accept a coincidental magic prefix: parse/validate it first.
-        _value_of(checksum, "binary", get_buffer)
-        return checksum, None
+        # A corrupt payload is wrapped below, like any other bytes: every
+        # bytes buffer converts to binary.
+        try:
+            _value_of(checksum, "binary", get_buffer)
+        except ValueError:
+            pass
+        else:
+            return checksum, None
 
     import numpy as np
 
@@ -304,9 +310,12 @@ def _bytes_to_mixed(
     if virtual_value(checksum, "mixed") is not NOT_VIRTUAL:
         return checksum, None
 
+    # Only a proof may skip the fetch: a Seamless-mixed word answers None,
+    # because its payload was never read.
     hash_type = _cached_hash_type(checksum)
-    if hash_type is not None and hash_type.deserializable_as(
-        "mixed", checksum=checksum
+    if (
+        hash_type is not None
+        and hash_type.deserializable_as("mixed", checksum=checksum) is True
     ):
         return checksum, None
 
@@ -314,11 +323,16 @@ def _bytes_to_mixed(
     from .hash_type import HashType
 
     inspected_type = HashType.from_buffer(buffer)
-    if inspected_type.deserializable_as("mixed", checksum=checksum):
-        # Ensure a malformed mixed/NPY payload cannot be retained merely from
-        # its prefix or JSON classification.
-        _value_of(checksum, "mixed", get_buffer)
-        return checksum, None
+    if inspected_type.deserializable_as("mixed", checksum=checksum) is not False:
+        # Ensure a malformed mixed payload cannot be retained merely from its
+        # magic prefix. Like any other bytes that are not a mixed value, it is
+        # then wrapped below: every bytes buffer converts to mixed.
+        try:
+            _value_of(checksum, "mixed", get_buffer)
+        except ValueError:
+            pass
+        else:
+            return checksum, None
 
     try:
         text = buffer.content.decode().rstrip("\n")

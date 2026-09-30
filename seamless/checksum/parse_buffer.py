@@ -89,6 +89,23 @@ def _parse_scalar(buffer: Buffer, celltype: str):
             raise original_error from None
 
 
+def _deserialize_mixed(buffer: Buffer, celltype: str):
+    """Run the Seamless-mixed deserializer; a malformed payload is a ValueError."""
+
+    from ..util.mixed.io import deserialize as mixed_deserialize
+
+    try:
+        return mixed_deserialize(buffer.content)
+    except ValueError:
+        raise
+    except Exception as exc:
+        # A truncated or corrupt payload surfaces as AssertionError, IndexError,
+        # ... from the format internals; a failed read must be a ValueError.
+        raise ValueError(
+            f"Malformed {celltype} buffer: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def validate_text(text: str, celltype: str, code_filename):
     """Validate that 'text' is a valid value of 'celltype'.
     A 'code_filename' can be provided for code buffers, to mark them with a
@@ -158,15 +175,11 @@ def _parse_buffer(buffer: Buffer, checksum: Checksum, celltype: str):
     elif celltype == "plain":
         value = _parse_buffer_plain(buffer.content)
     elif celltype == "binary":
-        from ..util.mixed.io import deserialize as mixed_deserialize
-
-        value, storage = mixed_deserialize(buffer.content)
+        value, storage = _deserialize_mixed(buffer, celltype)
         if storage != "pure-binary":
-            raise TypeError
+            raise ValueError("Buffer is not an .npy buffer")
     elif celltype == "mixed":
-        from ..util.mixed.io import deserialize as mixed_deserialize
-
-        value, _ = mixed_deserialize(buffer.content)
+        value, _ = _deserialize_mixed(buffer, celltype)
     elif celltype == "bytes":
         value = buffer
     elif celltype in ("str", "int", "float", "bool"):
