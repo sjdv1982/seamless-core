@@ -358,20 +358,26 @@ async def evaluate_expression_remote(
     execution: str = "auto",
     member_id: object | None = None,
     scratch: bool = True,
+    materialize: bool | None = None,
 ) -> Checksum:
     """Evaluate an expression with remote cache lookup and optional jobserver dispatch.
 
-    ``scratch=False`` is a request for the bytes: the answer must be a result
-    checksum whose buffer this process can reach (in memory, or on the
-    hashserver). A cached checksum without a reachable buffer is not an
-    answer; the Expression is then materialized, locally or on the executing
-    side, which writes the result because the request is non-scratch.
+    ``scratch=False`` asks the executing side of a dispatch to write the
+    result to the hashserver.
+
+    ``materialize`` (default: ``not scratch``) is a request for the bytes: the
+    answer must be a result checksum whose buffer this process can reach (in
+    memory, or on the hashserver). A cached checksum without a reachable
+    buffer is not an answer; the Expression is then materialized, locally or
+    on the executing side. An owner asking only for a checksum passes
+    ``materialize=False``: any recorded checksum answers it.
     """
 
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
         raise NotImplementedError("Expression validators are not implemented yet")
-    materialize = not scratch
+    if materialize is None:
+        materialize = not scratch
     key = ExpressionKey(Checksum(input_checksum), path, input_celltype, celltype)
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
@@ -995,8 +1001,11 @@ async def _result_reachable(checksum: Checksum) -> bool:
     if not lengths:
         return False
     length = lengths[0]
-    # The hashserver answers False for a missing buffer; bool is an int subclass.
-    return isinstance(length, int) and not isinstance(length, bool) and length >= 0
+    # A read server answers /has with a boolean; a read folder with a length,
+    # or None. bool is an int subclass, so test it first.
+    if isinstance(length, bool):
+        return length
+    return isinstance(length, int) and length >= 0
 
 
 def _deserialize_for_expression(buffer: Buffer, input_celltype: str) -> Any:

@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import sys
 import threading
 
 import pytest
@@ -44,6 +45,66 @@ def test_hashserver_only_input_dispatches_from_getter(monkeypatch):
 
     assert _cell(source_checksum).checksum == result_checksum
     assert calls == ["database:get", "jobserver:run", "database:set"]
+
+
+@pytest.mark.parametrize("scratch", [False, True])
+def test_getter_dispatch_carries_the_cell_scratch_policy(monkeypatch, scratch):
+    # cells.md, *Scratch*: a non-scratch Cell's requests carry scratch=False,
+    # so the executing side writes the end result and .value works after a
+    # remote evaluation; a scratch Cell's dispatched result is never written.
+    get_expression_cache().clear()
+    source = Buffer({"a": "remote"}, "plain")
+    source_checksum = source.get_checksum()
+    result = Buffer("remote", "str")
+    result_checksum = result.get_checksum()
+    drop_buffer(source_checksum)
+    drop_buffer(result_checksum)
+    key = (source_checksum.hex(), "a", "plain", "str")
+    calls, buffers, sent = [], {}, []
+    install_fake_remotes(monkeypatch, {}, {key: result_checksum}, calls, buffers=buffers)
+    jobserver_remote = sys.modules["seamless_remote.jobserver_remote"]
+    fake_run_expression = jobserver_remote.run_expression
+
+    async def run_expression(*args, scratch=False):
+        sent.append(scratch)
+        answer = await fake_run_expression(*args, scratch=scratch)
+        if not scratch:  # the executing side writes the end result
+            buffers[answer] = result.content
+        return answer
+
+    monkeypatch.setattr(jobserver_remote, "run_expression", run_expression)
+    cell = _cell(source_checksum)
+    cell.scratch = scratch
+
+    assert cell.checksum == result_checksum
+    assert sent == [scratch]
+    if scratch:
+        assert buffers == {}
+    else:
+        assert cell.value == "remote"
+
+
+@pytest.mark.parametrize("scratch", [False, True])
+def test_getter_accepts_a_recorded_checksum_whose_buffer_is_unreachable(
+    monkeypatch, scratch
+):
+    # A getter asks for a checksum, so a recorded result answers it even when
+    # its buffer is reachable nowhere, whatever the Cell's scratch. Only a
+    # value request (run(), fingertip) insists on reachable bytes.
+    get_expression_cache().clear()
+    source_checksum = Checksum("2" * 64)
+    result_checksum = Buffer("recorded, not stored", "str").get_checksum()
+    drop_buffer(source_checksum)
+    drop_buffer(result_checksum)
+    key = (source_checksum.hex(), "a", "plain", "str")
+    calls = []
+    install_fake_remotes(monkeypatch, {key: result_checksum}, {}, calls)
+    cell = _cell(source_checksum)
+    cell.scratch = scratch
+
+    assert cell.checksum == result_checksum
+    assert cell.exception is None
+    assert "jobserver:run" not in calls
 
 
 def test_concurrent_getters_share_one_dispatch(monkeypatch):
