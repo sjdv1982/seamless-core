@@ -339,7 +339,9 @@ def test_long_concrete_numbers_are_disproved_only_for_int_and_float(celltype):
     result = word.deserializable_as(celltype, checksum=CHECKSUM)
     if celltype in ("int", "float"):
         assert result is False
-    elif celltype in ("bytes", "text", "python", "ipython", "yaml", "plain", "str", "mixed"):
+    elif celltype in ("python", "ipython", "yaml"):
+        assert result is None
+    elif celltype in ("bytes", "text", "plain", "str", "mixed"):
         assert result is True
 
 
@@ -422,7 +424,7 @@ def test_forbidden_pairs_are_false_even_for_a_valid_source(source, target):
     """§conversion_feasible rule 2: a forbidden pair -> False, even where the source
     reads fine (rule 4 would not have refused it)."""
     word, checksum = _valid_source(source)
-    assert word.deserializable_as(source, checksum=checksum) is True
+    assert word.deserializable_as(source, checksum=checksum) is not False
     assert conversion_feasible(word, source, target, checksum=checksum) is False
 
 
@@ -638,6 +640,13 @@ def test_module_is_a_structural_name_but_not_a_deep_celltype():
 
 def _extra_buffers():
     return [
+        b" null \n",
+        b"null\n\n",
+        b"def\n",
+        b"a: [\n",
+        b"g" * 64,
+        _mixed_header({"a": 1})[:-1],
+        _npy(np.array([1, 2])) + b"trailing",
         b'"inf"', b'"nan"', b'"1e400"', b"1e308", b"-0", b'""', b"[]", b"{}",
         b'"abc"', b"3.5", b"17", b"true\n", b"false\n", b"null\n", b'"true"',
         b"x = 1\n", b"a: 1\n", b"  42  ", b"42\n",
@@ -729,6 +738,49 @@ def test_false_negative_property_for_deserialization(monkeypatch, name, raw):
             if word.deserializable_as(celltype, checksum=checksum) is False:
                 false_rejections.append((word.kind.name, celltype))
     assert false_rejections == []
+
+
+@pytest.mark.parametrize("name,raw", CORPUS, ids=[c[0] for c in CORPUS])
+def test_positive_property_for_deserialization(name, raw):
+    """§The positive property: True proves reference-parser acceptance."""
+    from seamless.checksum.parse_buffer import _parse_buffer
+
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+    word = from_buffer(raw)
+    for celltype in THE_13:
+        if word.deserializable_as(celltype, checksum=checksum) is True:
+            try:
+                _parse_buffer(buffer, checksum, celltype)
+            except Exception as exc:
+                pytest.fail(
+                    f"{word.kind.name} proved {celltype} for {name}, "
+                    f"but the reference parser raised {type(exc).__name__}: {exc}"
+                )
+
+
+def test_expression_loads_database_only_hash_type_before_buffer_check(monkeypatch):
+    """§Where HashType is consulted: a database proof can settle an RI in a loop."""
+    from seamless.checksum.hash_type import get_hash_type_cache
+    from helpers.fake_remotes import drop_buffer
+
+    raw = b'{"database-only-proof": true}'
+    checksum = Checksum(hashlib.sha256(raw).digest())
+    word = from_buffer(raw)
+    rows = {checksum.hex(): word.word}
+    calls = []
+    install_fake_remotes(monkeypatch, {}, {}, calls, hash_type_rows=rows)
+    get_hash_type_cache().pop(checksum, None)
+    drop_buffer(checksum)
+
+    async def evaluate():
+        expression = Expression(
+            checksum, path="", input_celltype="bytes", celltype="plain"
+        )
+        return await expression.compute_async(execution="local")
+
+    assert asyncio.run(evaluate()) == checksum
+    assert calls.count("database:get_hash_type") == 1
 
 
 @pytest.mark.parametrize("name,raw", CORPUS, ids=[c[0] for c in CORPUS])

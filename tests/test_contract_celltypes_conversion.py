@@ -509,6 +509,102 @@ def test_every_reinterpret_pair_keeps_checksum_or_raises(source, target):
             convert_checksum(buffer.get_checksum(), source, target, lambda: buffer)
 
 
+@pytest.mark.parametrize(
+    "source,target,value",
+    [
+        ("bytes", "text", b"proof bytes text"),
+        ("bytes", "plain", b'{"proof":"bytes plain"}'),
+        ("mixed", "plain", {"proof": "mixed plain"}),
+        ("mixed", "binary", np.array([31, 32])),
+        ("plain", "int", 127),
+        ("plain", "float", 128.5),
+        ("str", "int", "129"),
+        ("str", "float", "130.5"),
+    ],
+)
+def test_reinterpretation_hash_type_proof_settles_without_fetching(
+    source, target, value
+):
+    """§Executor, RI: a HashType proof keeps the checksum without fetching."""
+    buffer = _source(value, source)
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, source, target) is False
+    assert convert_checksum(checksum, source, target, _fail_if_fetched) == (
+        checksum,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "source,target,value",
+    [
+        ("bytes", "text", b"no-proof bytes text"),
+        ("bytes", "plain", b'{"no-proof":"bytes plain"}'),
+        ("mixed", "plain", {"no-proof": "mixed plain"}),
+        ("mixed", "binary", np.array([231, 232])),
+        ("plain", "int", 223),
+        ("plain", "float", 224.5),
+        ("str", "int", "225"),
+        ("str", "float", "226.5"),
+    ],
+)
+def test_reinterpretation_without_hash_type_fetches_once(source, target, value):
+    """§Executor, RI: with no word, parsing fetches the source exactly once."""
+    buffer = _source(value, source)
+    checksum = Checksum(hashlib.sha256(buffer.content).digest())
+    get_buffer, calls = _counting_getter(buffer)
+
+    assert conversion_needs_buffer(checksum, source, target) is True
+    assert convert_checksum(checksum, source, target, get_buffer) == (
+        checksum,
+        None,
+    )
+    assert calls == [None]
+
+
+@pytest.mark.parametrize(
+    "source,target,raw,parses",
+    [
+        ("text", "python", b"def\n", False),
+        ("text", "ipython", b"def\n", True),
+        ("text", "yaml", b"a: [\n", False),
+        ("plain", "str", b'"abc"', True),
+        ("plain", "str", b" null \n", False),
+    ],
+)
+def test_reinterpretation_without_a_proof_fetches_and_parses(
+    source, target, raw, parses
+):
+    """§Executor, RI: unknown readings fetch; parser errors remain errors."""
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+    get_buffer, calls = _counting_getter(buffer)
+
+    assert conversion_needs_buffer(checksum, source, target) is True
+    if parses:
+        assert convert_checksum(checksum, source, target, get_buffer) == (
+            checksum,
+            None,
+        )
+    else:
+        with pytest.raises(SeamlessConversionError):
+            convert_checksum(checksum, source, target, get_buffer)
+    assert calls == [None]
+
+
+def test_reinterpretation_proofs_settle_a_conversion_chain():
+    """§Executor, RI: each checksum-preserving step can settle from the word."""
+    buffer = Buffer(b"42")
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, "bytes", "int") is False
+    assert convert_checksum(checksum, "bytes", "int", _fail_if_fetched) == (
+        checksum,
+        None,
+    )
+
+
 def test_hash_type_validation_error_is_wrapped_as_conversion_error():
     """§Executor, Errors: HashTypeValidationError is wrapped."""
     buffer = Buffer("def (:", "text")
@@ -767,12 +863,6 @@ def test_binary_array_converts_through_plain_and_text(target):
 
 
 # --- Empty-path Expression is the engine's only caller ----------------------
-
-
-_NULL_CONTRACT = (
-    f"{DOC} §Null and conversion legality / Implementation status (null "
-    "short-circuits only on legal pairs): contract ahead of code: "
-)
 
 
 @pytest.mark.parametrize("source", list(celltypes))

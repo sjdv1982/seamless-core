@@ -207,14 +207,25 @@ async def evaluate_expression_async(
     from .convert import conversion_needs_buffer
 
     cached = _expression_cache.get(key)
-    if (
-        cached is not None and (not materialize or _has_local_buffer(cached))
-    ) or (
-        not path
-        and not conversion_needs_buffer(
+    cached_result = cached is not None and (
+        not materialize or _has_local_buffer(cached)
+    )
+    if not cached_result and not path:
+        if expression_key.input_celltype != expression_key.celltype:
+            from .null import canonicalize_checksum, is_null
+
+            if not is_null(
+                canonicalize_checksum(expression_key.input_checksum, celltype)
+            ):
+                from .hash_type_validation import ensure_hash_type_async
+
+                await ensure_hash_type_async(expression_key.input_checksum)
+        needs_buffer = conversion_needs_buffer(
             expression_key.input_checksum, input_celltype, celltype
         )
-    ):
+    else:
+        needs_buffer = True
+    if cached_result or (not path and not needs_buffer):
         return await _evaluate_expression_async(
             input_checksum, path, input_celltype, celltype, materialize=materialize
         )
@@ -300,6 +311,9 @@ async def _evaluate_expression_async(
         and key.input_celltype != key.celltype
         and not is_null(canonicalize_checksum(key.input_checksum, key.celltype))
     ):
+        from .hash_type_validation import ensure_hash_type_async
+
+        await ensure_hash_type_async(key.input_checksum)
         needs_buffer = conversion_needs_buffer(
             key.input_checksum, key.input_celltype, key.celltype
         )
@@ -407,6 +421,13 @@ async def evaluate_expression_remote(
 
     from .convert import conversion_needs_buffer
 
+    if not key.path and key.input_celltype != key.celltype:
+        from .null import canonicalize_checksum, is_null
+
+        if not is_null(canonicalize_checksum(key.input_checksum, key.celltype)):
+            from .hash_type_validation import ensure_hash_type_async
+
+            await ensure_hash_type_async(key.input_checksum)
     needs_input = bool(key.path) or conversion_needs_buffer(
         key.input_checksum, key.input_celltype, key.celltype
     )

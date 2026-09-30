@@ -209,8 +209,7 @@ def _convert(
     if conv in conversion_trivial:
         return checksum, None
     if conv in conversion_reinterpret:
-        _value_of(checksum, target, get_buffer)
-        return checksum, None
+        return _reinterpret(checksum, target, get_buffer)
     if conv in conversion_reformat:
         return _convert_reformat(checksum, source, target, get_buffer)
     if conv in conversion_possible:
@@ -218,6 +217,25 @@ def _convert(
     if conv in conversion_values:
         return _convert_values(checksum, source, target, get_buffer)
     raise AssertionError(f"Unclassified conversion: {conv!r}")
+
+
+def _reinterpret(
+    checksum: Checksum, target: str, get_buffer: Callable[[], Buffer]
+) -> tuple[Checksum, Buffer | None]:
+    from .hash_type_validation import validate_deserializable_as
+    from .parse_buffer import _parse_buffer
+    from .virtual import NOT_VIRTUAL, virtual_value
+
+    if virtual_value(checksum, target) is not NOT_VIRTUAL:
+        return checksum, None
+    hash_type = validate_deserializable_as(checksum, target)
+    if (
+        hash_type is not None
+        and hash_type.deserializable_as(target, checksum=checksum) is True
+    ):
+        return checksum, None
+    _parse_buffer(get_buffer(), checksum, target)
+    return checksum, None
 
 
 def _value_of(
@@ -312,7 +330,9 @@ def _bytes_to_mixed(
 
     # Only a proof may skip the fetch: a Seamless-mixed word answers None,
     # because its payload was never read.
-    hash_type = _cached_hash_type(checksum)
+    from .hash_type_validation import ensure_hash_type
+
+    hash_type = ensure_hash_type(checksum)
     if (
         hash_type is not None
         and hash_type.deserializable_as("mixed", checksum=checksum) is True
@@ -460,12 +480,6 @@ def _convert_values(
     # buffer.
     target_value = getattr(builtins, target)(value)
     return _buffer_result(Buffer(target_value, target))
-
-
-def _cached_hash_type(checksum: Checksum):
-    from .hash_type import get_hash_type
-
-    return get_hash_type(checksum)
 
 
 def _coerce_buffer(value: Buffer | bytes | bytearray | memoryview) -> Buffer:
