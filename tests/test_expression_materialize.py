@@ -1,7 +1,8 @@
-"""A non-scratch request asks for the bytes: materialize, never answer from a cache alone.
+"""A value request asks for the bytes: materialize, never answer from a cache alone.
 
-``scratch=False`` (``Expression.run()``, a non-scratch Cell) is answered only by a
-result checksum whose buffer the requester can reach. A cached checksum without a
+A value request (``Expression.run()``) is answered only by a result checksum whose
+buffer the requester can reach. A checksum request, even from a non-scratch owner,
+accepts any recorded checksum. A cached checksum without a
 reachable buffer is evaluated again: locally, or by a non-scratch dispatch that the
 executing side materializes and writes. With the input reachable nowhere, the answer
 is ``CacheMissError`` on the result; recovering it is ``fingertip()``'s job.
@@ -150,3 +151,33 @@ def test_cell_scratch_is_per_cell():
     # A projection or a retyping is a new Cell that owns its own result.
     assert cell.as_celltype("mixed").scratch is False
     assert cell["a"].scratch is False
+
+
+@pytest.mark.parametrize(
+    "answer,reachable",
+    [(True, True), (False, False), (5, True), (0, True), (None, False)],
+)
+def test_result_reachable_reads_server_booleans_and_folder_lengths(
+    monkeypatch, answer, reachable
+):
+    # A read server answers /has with a boolean, a read folder with a length
+    # or None; a buffer the hashserver has is reachable.
+    import asyncio
+    import sys
+    from types import ModuleType
+
+    buffer_remote = ModuleType("seamless_remote.buffer_remote")
+
+    async def get_buffer_lengths(checksums):
+        return [answer for _ in checksums]
+
+    buffer_remote.get_buffer_lengths = get_buffer_lengths
+    seamless_remote = ModuleType("seamless_remote")
+    seamless_remote.__path__ = []
+    seamless_remote.buffer_remote = buffer_remote
+    monkeypatch.setitem(sys.modules, "seamless_remote", seamless_remote)
+    monkeypatch.setitem(sys.modules, "seamless_remote.buffer_remote", buffer_remote)
+    checksum = Checksum("3" * 64)
+    drop_buffer(checksum)
+
+    assert asyncio.run(expression_mod._result_reachable(checksum)) is reachable

@@ -159,7 +159,9 @@ class CellBase:
         try:
             expression = self.build()
             self._standalone_expression = expression
-            result = _available_input_checksum(expression)
+            result = _available_input_checksum(
+                expression, scratch=getattr(self, "_scratch", False)
+            )
         except RunningLoopRefusal:
             return None
         except Exception as exc:
@@ -1105,15 +1107,23 @@ def _capture_workflow_source(value: Any) -> Any:
 __all__ = ["Cell", "CellBase"]
 
 
-def _available_input_checksum(value):
-    """Read an input result without starting transformation work."""
+def _available_input_checksum(value, *, scratch=True):
+    """Read an input result without starting transformation work.
+
+    ``scratch`` is the requesting owner's policy. A non-scratch owner's
+    dispatched evaluation is materialized and written by the executing side;
+    an input read for its checksum alone stays scratch. Either way this is a
+    checksum request, so any recorded checksum answers it.
+    """
     from .checksum_class import Checksum
 
     if isinstance(value, Checksum):
         return value
     if isinstance(value, Expression):
         if isinstance(value._input_ref, Checksum):
-            return value._evaluate_internal(execution="auto")
+            return value._evaluate_internal(
+                execution="auto", scratch=scratch, materialize=False
+            )
         checksum = _available_input_checksum(value._input_ref)
         if checksum is None:
             return None
@@ -1125,7 +1135,7 @@ def _available_input_checksum(value):
             validator_language=value.validator_language,
         )
         try:
-            result = concrete.compute()
+            result = concrete._compute_for_owner(scratch=scratch)
         finally:
             concrete._release_refholds()
         return value._publish_result(result) if result is not None else None
