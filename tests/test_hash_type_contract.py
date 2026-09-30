@@ -136,11 +136,11 @@ CONCRETE_WORDS = {
 CONCRETE_DESERIALIZATION = {
     "bytes": set(CONCRETE_WORDS),
     "text": {"raw-text", "json-object", "json-array", "json-string", "json-number"},
-    "python": {"raw-text", "json-object", "json-array", "json-string", "json-number"},
-    "ipython": {"raw-text", "json-object", "json-array", "json-string", "json-number"},
-    "yaml": {"raw-text", "json-object", "json-array", "json-string", "json-number"},
+    "python": set(),
+    "ipython": set(),
+    "yaml": set(),
     "plain": {"json-object", "json-array", "json-string", "json-number"},
-    "str": {"json-string", "json-number"},
+    "str": {"json-number"},
     "int": {"json-number"},
     "float": {"json-number"},
     "binary": {"numpy"},
@@ -151,14 +151,24 @@ CONCRETE_DESERIALIZATION = {
         "json-string",
         "json-number",
     },
-    "checksum": {"raw-text", "json-number"},
+    "checksum": set(),
     "bool": set(),
 }
 
 # Concrete words that neither prove nor disprove a reading: None.
 CONCRETE_UNKNOWN = {
-    # The producer reads only the Seamless-mixed header.
     "mixed": {"mixed-object", "mixed-array"},
+    "python": {
+        "raw-text", "json-object", "json-array", "json-string", "json-number"
+    },
+    "ipython": {
+        "raw-text", "json-object", "json-array", "json-string", "json-number"
+    },
+    "yaml": {
+        "raw-text", "json-object", "json-array", "json-string", "json-number"
+    },
+    "str": {"json-string"},
+    "checksum": {"raw-text", "json-number"},
 }
 
 

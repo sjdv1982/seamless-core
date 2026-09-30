@@ -287,7 +287,12 @@ _hash_type_lock = threading.RLock()
 def set_hash_type(
     checksum: Checksum | str | bytes, hash_type: HashType | int, *, _upload=True
 ) -> None:
-    """Atomically tighten local knowledge and queue changes for upload."""
+    """Atomically tighten local knowledge and queue changes for upload.
+
+    Untested kinds make whole-buffer claims: ``UTF8_UNTESTED`` means the whole
+    buffer decodes as UTF-8, and ``JSON_UNTESTED`` means ``orjson`` parses the
+    whole buffer. Use ``UNTESTED`` when neither check has been performed.
+    """
     with _hash_type_lock:
         _set_hash_type(checksum, hash_type, _upload=_upload)
 
@@ -372,7 +377,12 @@ async def get_hash_type_remote(checksum: Checksum | str | bytes) -> HashType | N
 async def set_hash_type_remote(
     checksum: Checksum | str | bytes, hash_type: HashType | int
 ) -> bool:
-    """Tighten local HashType knowledge and queue its database write."""
+    """Tighten local HashType knowledge and queue its database write.
+
+    Untested kinds make whole-buffer claims: ``UTF8_UNTESTED`` means the whole
+    buffer decodes as UTF-8, and ``JSON_UNTESTED`` means ``orjson`` parses the
+    whole buffer. Use ``UNTESTED`` when neither check has been performed.
+    """
 
     set_hash_type(checksum, hash_type)
     return True
@@ -443,7 +453,7 @@ def deserializable_as(
     *,
     checksum: Checksum | str | bytes,
 ) -> bool | None:
-    """Return True (known), False (disproved), or None (requires parsing)."""
+    """Return True (proven), False (disproved), or None (requires parsing)."""
 
     if celltype not in HASH_TYPE_CELLTYPES:
         raise ValueError(f"celltype is outside the HashType domain: {celltype!r}")
@@ -457,8 +467,10 @@ def deserializable_as(
     if celltype == "bool":
         return checksum_obj in _BOOL_CHECKSUMS
     if ti.is_untested:
-        if celltype in ("text", "yaml", "ipython", "python"):
+        if celltype == "text":
             return True if ti.is_utf8 else None
+        if celltype in ("yaml", "ipython", "python"):
+            return None
         if celltype in ("plain", "mixed"):
             return True if ti.is_json else None
         if celltype == "str":
@@ -471,14 +483,18 @@ def deserializable_as(
             # A digest of only decimal digits is a JSON number, so JSON is no proof.
             return None if ti.length == Length.EQ64 else False
         return False
-    if celltype in ("text", "yaml", "ipython", "python"):
+    if celltype == "text":
         return ti.is_utf8
+    if celltype in ("yaml", "ipython", "python"):
+        return None if ti.is_utf8 else False
     if celltype == "plain":
         return ti.is_json
     if celltype == "str":
-        return kind in (Kind.JSON_STRING, Kind.JSON_NUMBER) or (
-            checksum_obj in _SCALAR_CONST_CHECKSUMS
-        )
+        if kind == Kind.JSON_NUMBER or checksum_obj in _SCALAR_CONST_CHECKSUMS:
+            return True
+        if kind == Kind.JSON_STRING:
+            return True if ti.flags & Flag.NUMERIC_SCALAR else None
+        return False
     if celltype in ("int", "float"):
         if ti.length == Length.LONG:
             return False
@@ -494,7 +510,9 @@ def deserializable_as(
         return True
     if celltype == "checksum":
         # A digest of only decimal digits is also a JSON number.
-        return kind in (Kind.RAW_TEXT, Kind.JSON_NUMBER) and ti.length == Length.EQ64
+        if kind in (Kind.RAW_TEXT, Kind.JSON_NUMBER) and ti.length == Length.EQ64:
+            return None
+        return False
     return False
 
 

@@ -74,9 +74,9 @@ def test_semantic_flag_is_reserved():
 @pytest.mark.parametrize("celltype,outcomes", [
     ("bytes", (True, True, True)),
     ("text", (None, True, True)),
-    ("python", (None, True, True)),
-    ("ipython", (None, True, True)),
-    ("yaml", (None, True, True)),
+    ("python", (None, None, None)),
+    ("ipython", (None, None, None)),
+    ("yaml", (None, None, None)),
     ("plain", (None, None, True)),
     ("mixed", (None, None, True)),
     ("str", (None, None, None)),

@@ -72,6 +72,8 @@ def _assert_target_value(value, expected):
 @pytest.mark.parametrize(
     "source,target,value,source_celltype,expected",
     [
+        ("plain", "int", "42", "plain", lambda buffer: 42),
+        ("bytes", "str", b'"42"', None, lambda buffer: "42"),
         ("float", "int", 4.5, "float", lambda buffer: 4),
         ("int", "str", b"4.5\n", None, lambda buffer: "4.5"),
         ("bool", "str", True, "bool", lambda buffer: "True"),
@@ -99,8 +101,6 @@ def test_no_fetch_keep_conversion_rules_preserve_checksum(
 @pytest.mark.parametrize(
     "source,target,buffer,expected",
     [
-        ("plain", "int", lambda: Buffer("42", "plain"), lambda buffer: 42),
-        ("bytes", "str", lambda: Buffer(b'"42"'), lambda buffer: "42"),
         ("text", "plain", lambda: Buffer(b'{"a":1}'), lambda buffer: {"a": 1}),
         (
             "plain",
