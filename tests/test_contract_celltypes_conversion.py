@@ -536,6 +536,28 @@ def test_reinterpretation_hash_type_proof_settles_without_fetching(
     )
 
 
+@pytest.mark.parametrize("raw", (b'"abc"', b"true ", b"false ", b"null", b"null\n"))
+def test_plain_to_str_hash_type_proof_does_not_fetch(raw):
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, "plain", "str") is False
+    assert convert_checksum(checksum, "plain", "str", _fail_if_fetched) == (
+        checksum,
+        None,
+    )
+
+
+@pytest.mark.parametrize("raw", (b" null \n", b"null\n\n"))
+def test_plain_to_str_hash_type_disproof_does_not_fetch(raw):
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, "plain", "str") is False
+    with pytest.raises(SeamlessConversionError):
+        convert_checksum(checksum, "plain", "str", _fail_if_fetched)
+
+
 @pytest.mark.parametrize(
     "source,target,value",
     [
@@ -569,8 +591,6 @@ def test_reinterpretation_without_hash_type_fetches_once(source, target, value):
         ("text", "python", b"def\n", False),
         ("text", "ipython", b"def\n", True),
         ("text", "yaml", b"a: [\n", False),
-        ("plain", "str", b'"abc"', True),
-        ("plain", "str", b" null \n", False),
     ],
 )
 def test_reinterpretation_without_a_proof_fetches_and_parses(

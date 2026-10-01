@@ -29,6 +29,7 @@ class Kind(IntEnum):
     UNTESTED = 9
     UTF8_UNTESTED = 10
     JSON_UNTESTED = 11
+    JSON_NULL = 12
 
 
 class Length(IntEnum):
@@ -84,7 +85,7 @@ class HashType:
     def is_utf8(self) -> bool:
         return self.kind in (
             Kind.RAW_TEXT, Kind.JSON_OBJECT, Kind.JSON_ARRAY,
-            Kind.JSON_STRING, Kind.JSON_NUMBER,
+            Kind.JSON_STRING, Kind.JSON_NUMBER, Kind.JSON_NULL,
             Kind.UTF8_UNTESTED, Kind.JSON_UNTESTED,
         )
 
@@ -92,7 +93,7 @@ class HashType:
     def is_json(self) -> bool:
         return self.kind in (
             Kind.JSON_OBJECT, Kind.JSON_ARRAY, Kind.JSON_STRING,
-            Kind.JSON_NUMBER, Kind.JSON_UNTESTED,
+            Kind.JSON_NUMBER, Kind.JSON_NULL, Kind.JSON_UNTESTED,
         )
 
     @property
@@ -160,6 +161,7 @@ MIC_BY_KIND = {
     Kind.UNTESTED: "bytes",
     Kind.UTF8_UNTESTED: "text",
     Kind.JSON_UNTESTED: "plain",
+    Kind.JSON_NULL: "plain",
 }
 
 FLAT_SEQ_CELLTYPES = {"text", "str", "python", "ipython", "yaml"}
@@ -493,7 +495,9 @@ def deserializable_as(
         if kind == Kind.JSON_NUMBER or checksum_obj in _SCALAR_CONST_CHECKSUMS:
             return True
         if kind == Kind.JSON_STRING:
-            return True if ti.flags & Flag.NUMERIC_SCALAR else None
+            return True
+        if kind == Kind.JSON_NULL:
+            return False
         return False
     if celltype in ("int", "float"):
         if ti.length == Length.LONG:
@@ -676,9 +680,11 @@ def _json_kind_and_flags(text: str) -> tuple[Kind | None, Flag]:
                 else Flag(0)
             )
         return Kind.JSON_STRING, flags
+    if value is None:
+        return Kind.JSON_NULL, Flag(0)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return Kind.JSON_NUMBER, Flag.NUMERIC_SCALAR
-    if value is True or value is False or value is None:
+    if value is True or value is False:
         return Kind.JSON_STRING, Flag(0)
     return None, Flag(0)
 

@@ -29,6 +29,7 @@ LONG_NUMERIC_JSON_STRING = HashType(
 )
 UNFLAGGED_JSON_STRING = HashType(Kind.JSON_STRING, Length.SHORT)
 LONG_UNFLAGGED_JSON_STRING = HashType(Kind.JSON_STRING, Length.LONG)
+JSON_NULL = HashType(Kind.JSON_NULL, Length.SHORT)
 
 
 @pytest.mark.parametrize(
@@ -50,6 +51,8 @@ LONG_UNFLAGGED_JSON_STRING = HashType(Kind.JSON_STRING, Length.LONG)
         ("mixed", "float", LONG_NUMERIC_JSON_STRING, True),
         ("mixed", "float", UNFLAGGED_JSON_STRING, None),
         ("mixed", "int", LONG_UNFLAGGED_JSON_STRING, None),
+        ("mixed", "int", JSON_NULL, False),
+        ("mixed", "float", JSON_NULL, False),
         ("mixed", "int", HashType(Kind.UNTESTED, Length.LONG), None),
         ("mixed", "float", HashType(Kind.JSON_UNTESTED, Length.LONG), None),
     ],

@@ -210,7 +210,7 @@ def _build_witnesses() -> list[HashTypeWitness]:
             _witness(
                 name,
                 raw,
-                Kind.JSON_STRING,
+                Kind.JSON_NULL if raw == b"null" else Kind.JSON_STRING,
                 Length.SHORT,
                 value=None,
                 mic=mic,

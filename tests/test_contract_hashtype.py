@@ -164,6 +164,7 @@ DERIVED = {
     Kind.JSON_ARRAY: (True, True, False, False, False, "plain"),
     Kind.JSON_STRING: (True, True, False, False, False, "str"),
     Kind.JSON_NUMBER: (True, True, False, False, False, "float"),
+    Kind.JSON_NULL: (True, True, False, False, False, "plain"),
     Kind.UNTESTED: (False, False, True, False, False, "bytes"),
     Kind.UTF8_UNTESTED: (True, False, True, False, False, "text"),
     Kind.JSON_UNTESTED: (True, True, True, False, False, "plain"),
@@ -214,11 +215,22 @@ def test_finite_numeric_json_string_is_flagged(raw):
     assert word.flags & Flag.NUMERIC_SCALAR
 
 
-@pytest.mark.parametrize("raw", (b"true", b"false", b"null", b"true\n", b"null\n"))
-def test_json_constants_are_unflagged_json_strings(raw):
-    """§Producer step 4: true/false/null -> JSON_STRING with no flags."""
+@pytest.mark.parametrize(
+    "raw", (b"true", b"false", b"true\n", b"false\n", b"true ", b" false \n")
+)
+def test_json_booleans_are_unflagged_json_strings(raw):
+    """JSON booleans remain JSON_STRING with no flags, including whitespace."""
     word = from_buffer(raw)
     assert word.kind == Kind.JSON_STRING
+    assert word.flags == Flag(0)
+
+
+@pytest.mark.parametrize(
+    "raw", (b"null", b"null\n", b" null \n", b"null\n\n")
+)
+def test_json_null_is_unflagged_json_null(raw):
+    word = from_buffer(raw)
+    assert word.kind == Kind.JSON_NULL
     assert word.flags == Flag(0)
 
 
@@ -275,11 +287,33 @@ def test_producer_never_emits_untested_kinds():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", (Kind.RAW_TEXT, Kind.JSON_OBJECT, Kind.MIXED_OBJECT))
+@pytest.mark.parametrize(
+    "kind", (Kind.RAW_TEXT, Kind.JSON_OBJECT, Kind.MIXED_OBJECT, Kind.JSON_NULL)
+)
 @pytest.mark.parametrize("checksum", (CHECKSUM_TRUE, CHECKSUM_FALSE, CHECKSUM_NULL))
 def test_concrete_str_accepts_null_and_boolean_checksums(kind, checksum):
     """§deserializable_as, concrete `str`: ... or a null/boolean checksum."""
     assert deserializable_as(HashType(kind, Length.SHORT), "str", checksum=checksum) is True
+
+
+@pytest.mark.parametrize(
+    "raw,kind,expected",
+    (
+        (b'"abc"', Kind.JSON_STRING, True),
+        (b"true ", Kind.JSON_STRING, True),
+        (b"false ", Kind.JSON_STRING, True),
+        (b"null", Kind.JSON_NULL, True),
+        (b"null\n", Kind.JSON_NULL, True),
+        (b" null \n", Kind.JSON_NULL, False),
+        (b"null\n\n", Kind.JSON_NULL, False),
+    ),
+)
+def test_json_string_and_null_str_proofs_use_the_checksum(raw, kind, expected):
+    word = from_buffer(raw)
+    checksum = Buffer(raw).get_checksum()
+
+    assert word.kind == kind
+    assert word.deserializable_as("str", checksum=checksum) is expected
 
 
 def _any_word(kind: Kind, length: Length = Length.LONG) -> HashType:
@@ -456,7 +490,7 @@ def test_reinterpret_answers_deserializable_as_target(kind, expected):
 @pytest.mark.parametrize(
     "kind,expected",
     [(Kind.JSON_OBJECT, False), (Kind.JSON_ARRAY, False), (Kind.JSON_STRING, True),
-     (Kind.JSON_NUMBER, True), (Kind.MIXED_ARRAY, True)],
+     (Kind.JSON_NUMBER, True), (Kind.JSON_NULL, True), (Kind.MIXED_ARRAY, True)],
 )
 def test_mixed_to_str_rule(kind, expected):
     """§conversion_feasible, conversion_possible: mixed->str False only for JSON object/array."""
@@ -648,7 +682,8 @@ def _extra_buffers():
         _mixed_header({"a": 1})[:-1],
         _npy(np.array([1, 2])) + b"trailing",
         b'"inf"', b'"nan"', b'"1e400"', b"1e308", b"-0", b'""', b"[]", b"{}",
-        b'"abc"', b"3.5", b"17", b"true\n", b"false\n", b"null\n", b'"true"',
+        b'"abc"', b"3.5", b"17", b"true\n", b"false\n", b"true ",
+        b"false ", b"null\n", b'"true"',
         b"x = 1\n", b"a: 1\n", b"  42  ", b"42\n",
         _npy(np.array(True)), _npy(np.array(b"")), _npy(np.array(1 + 2j)),
         _npy(np.array([1.5])), _npy(np.array(np.nan)), _npy(np.array("12")),
