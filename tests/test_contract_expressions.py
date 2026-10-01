@@ -249,6 +249,42 @@ def test_new_buffer_conversion_then_path_does_not_fuse():
     assert projected.run() == "{"
 
 
+def test_path_conversion_path_does_not_fuse():
+    """expressions.md, Fusion: a conversion fuses into a following path only when
+    it is pathless; a conversion that follows a path inside its own Expression
+    closes the run, even when it is checksum-preserving."""
+    source = Buffer({"a": {"b": 3}}, "plain").get_checksum()
+    inner = Expression(source, "a", input_celltype="plain", celltype="mixed")
+    outer = Expression(inner, "b", input_celltype="mixed", celltype="mixed")
+
+    assert outer.identity_key[0] == ("expression", inner.identity_key)
+    assert outer.path == "b"
+    assert outer.run() == 3
+
+
+@pytest.mark.parametrize("path", [".a.__doc__", ".a.upper", ".a.__class__.__name__", ".n.append", ".d.keys"])
+def test_string_item_never_reads_an_attribute(path):
+    """expressions.md, Path syntax: a string item key indexes a dict or a
+    structured array and nothing else; it never falls back to getattr."""
+    source = Buffer({"a": "hello", "n": [1, 2], "d": {"k": 1}}, "plain").get_checksum()
+    expression = Expression(source, path, input_celltype="plain", celltype="plain")
+    with pytest.raises(ExpressionEvaluationError):
+        expression.compute(execution="local")
+
+
+def test_string_item_indexes_a_structured_array_field():
+    """expressions.md, Path syntax: a structured array's field, and a record's
+    field, remain string-keyed members."""
+    import numpy as np
+
+    array = np.zeros(2, dtype=np.dtype([("x", "<f8"), ("y", "<i8")], align=True))
+    array["x"] = [1.5, 2.5]
+    source = Buffer(array, "mixed").get_checksum()
+
+    assert list(Expression(source, ".x", input_celltype="mixed", celltype="mixed").run()) == [1.5, 2.5]
+    assert Expression(source, "[1].x", input_celltype="mixed", celltype="mixed").run() == 2.5
+
+
 def test_deep_step_is_a_fusion_barrier():
     """expressions.md, Fusion: a deep step is a barrier and forms no pair; the run
     ends at it, and what follows is a separate Expression over the child."""

@@ -1115,11 +1115,15 @@ def _apply_step(value: Any, step: tuple[str, Any]) -> Any:
             return value[payload]
         if kind == "item":
             if isinstance(payload, str):
-                if isinstance(value, dict):
+                # A string key addresses a dict key or a structured-array
+                # field, and nothing else: never an attribute of the value.
+                if isinstance(value, dict) or (
+                    hasattr(value, "dtype") and getattr(value.dtype, "fields", None)
+                ):
                     return value[payload]
-                if hasattr(value, "dtype") and getattr(value.dtype, "fields", None):
-                    return value[payload]
-                return getattr(value, payload)
+                raise TypeError(
+                    f"{type(value).__name__} has no string-keyed members"
+                )
             return value[payload]
     except Exception as exc:
         raise ExpressionEvaluationError(
