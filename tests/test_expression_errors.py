@@ -16,7 +16,7 @@ from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless.checksum.expression import (
     ExpressionEvaluationError,
     choose_expression_evaluation_location,
-    evaluate_expression,
+    evaluate_expression_local,
     get_expression_cache,
 )
 
@@ -77,7 +77,7 @@ def hashserver(monkeypatch):
 ], ids=["item", "slice", "conversion"])
 def test_missing_input_buffer_raises_cache_miss_error(path, input_celltype, celltype):
     with pytest.raises(CacheMissError) as info:
-        evaluate_expression(MISSING, path, input_celltype, celltype)
+        evaluate_expression_local(MISSING, path, input_celltype, celltype)
     assert not isinstance(info.value, ExpressionEvaluationError)
     assert info.value.args == (MISSING,)
 
@@ -90,7 +90,28 @@ def test_invalid_path_still_raises_expression_evaluation_error():
     source = Buffer({"a": 1}, "plain")
     source.tempref()
     with pytest.raises(ExpressionEvaluationError, match="Unclosed path bracket"):
-        evaluate_expression(source.get_checksum(), "a[", "plain", "plain")
+        evaluate_expression_local(source.get_checksum(), "a[", "plain", "plain")
+
+
+def test_unserializable_expression_result_keeps_its_type_through_envelope():
+    import numpy as np
+
+    from seamless.error_envelope import decode_error, encode_error
+
+    source = Buffer(
+        np.array([(1,)], dtype=np.dtype([("field", "i4")], align=True)),
+        "mixed",
+    )
+    source.tempref()
+
+    with pytest.raises(ExpressionEvaluationError) as info:
+        evaluate_expression_local(source.get_checksum(), "[0]", "mixed", "plain")
+
+    assert "not serializable as plain" in str(info.value)
+    assert isinstance(info.value.__cause__, TypeError)
+    decoded = decode_error(encode_error(info.value))
+    assert isinstance(decoded, ExpressionEvaluationError)
+    assert str(decoded) == str(info.value)
 
 
 def test_auto_location_treats_a_missing_buffer_as_remote():

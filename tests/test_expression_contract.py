@@ -10,7 +10,7 @@ from seamless import Buffer, Cell, Checksum, Expression
 from seamless.checksum import expression as expression_module
 from seamless.checksum.expression import (
     ExpressionEvaluationError,
-    evaluate_expression_remote,
+    evaluate_expression_placed,
     get_expression_cache,
 )
 
@@ -125,7 +125,7 @@ def test_expression_validators_are_deferred_at_all_evaluation_entrypoints(
         asyncio.run(expression.compute_async(execution="local"))
     with pytest.raises(NotImplementedError, match="validators are not implemented"):
         asyncio.run(
-            evaluate_expression_remote(
+            evaluate_expression_placed(
                 source_checksum,
                 "value",
                 "plain",

@@ -9,7 +9,7 @@ from seamless import Buffer, Cell, Checksum
 from seamless.checksum import expression as expression_mod
 from seamless.checksum.expression import (
     _active_expressions,
-    evaluate_expression_async,
+    evaluate_expression_local_async,
     get_expression_cache,
 )
 
@@ -165,11 +165,11 @@ def test_concurrent_evaluate_expression_async_calls_share_one_evaluation(monkeyp
 
     async def main():
         first = asyncio.create_task(
-            evaluate_expression_async(source_checksum, "a", "plain", "str")
+            evaluate_expression_local_async(source_checksum, "a", "plain", "str")
         )
         await entered.wait()
         second = asyncio.create_task(
-            evaluate_expression_async(source_checksum, "a", "plain", "str")
+            evaluate_expression_local_async(source_checksum, "a", "plain", "str")
         )
         await asyncio.sleep(0)
         gate.set()
@@ -236,7 +236,7 @@ def test_local_active_failure_and_cancellation_cleanup(monkeypatch, cancel):
     monkeypatch.setattr(expression_mod, "_evaluate_expression_async", evaluate)
 
     async def main():
-        tasks = [asyncio.create_task(evaluate_expression_async(missing, "a", "plain", "str"))
+        tasks = [asyncio.create_task(evaluate_expression_local_async(missing, "a", "plain", "str"))
                  for _ in range(2)]
         await entered.wait()
         if cancel:

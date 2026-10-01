@@ -19,9 +19,9 @@ from seamless.checksum import expression as expression_mod
 from seamless.checksum.expression import (
     ExpressionEvaluationError,
     _active_expressions,
-    evaluate_expression,
-    evaluate_expression_async,
-    evaluate_expression_remote,
+    evaluate_expression_local,
+    evaluate_expression_local_async,
+    evaluate_expression_placed,
     get_expression_cache,
 )
 from seamless.checksum.conversion import conversion_forbidden
@@ -186,16 +186,16 @@ def test_validator_refusal_is_total_even_for_a_cached_identity(monkeypatch):
         "compute-auto": lambda: guarded.compute(),
         "compute_async": lambda: asyncio.run(guarded.compute_async(execution="local")),
         "run": lambda: guarded.run(),
-        "evaluate_expression": lambda: evaluate_expression(
+        "evaluate_expression_local": lambda: evaluate_expression_local(
             source_checksum, "value", "plain", "plain", validator=validator
         ),
-        "evaluate_expression_async": lambda: asyncio.run(
-            evaluate_expression_async(
+        "evaluate_expression_local_async": lambda: asyncio.run(
+            evaluate_expression_local_async(
                 source_checksum, "value", "plain", "plain", validator=validator
             )
         ),
-        "evaluate_expression_remote": lambda: asyncio.run(
-            evaluate_expression_remote(
+        "evaluate_expression_placed": lambda: asyncio.run(
+            evaluate_expression_placed(
                 source_checksum, "value", "plain", "plain", validator_language="python"
             )
         ),
@@ -442,6 +442,61 @@ def test_softcancel_leaves_the_member_set_and_the_peer_keeps_the_evaluation(monk
     assert second.softcancel() is False  # completed: no longer a member
 
 
+def test_sync_local_evaluation_joins_member_set_between_threads(monkeypatch):
+    """Synchronous and asynchronous local callers share expression work."""
+    import concurrent.futures
+    import threading
+
+    source = Buffer({"a": "threaded local evaluation"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    original_apply_step = expression_mod._apply_step
+    started = threading.Event()
+    second_started = threading.Event()
+    duplicate_apply = threading.Event()
+    release = threading.Event()
+    applied = 0
+    applied_lock = threading.Lock()
+
+    def count_apply_step(value, step):
+        nonlocal applied
+        with applied_lock:
+            applied += 1
+            is_duplicate = applied > 1
+        if is_duplicate:
+            duplicate_apply.set()
+        else:
+            started.set()
+            assert release.wait(5)
+        return original_apply_step(value, step)
+
+    monkeypatch.setattr(expression_mod, "_apply_step", count_apply_step)
+
+    def evaluate():
+        return expression_mod.evaluate_expression_local(
+            source_checksum, "a", "plain", "str"
+        )
+
+    def evaluate_second():
+        second_started.set()
+        return evaluate()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(evaluate)
+        assert started.wait(5)
+        second = executor.submit(evaluate_second)
+        assert second_started.wait(5)
+        duplicated = duplicate_apply.wait(0.1)
+        release.set()
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert duplicated is False
+    assert applied == 1
+    assert first_result == second_result
+    assert first_result == Buffer("threaded local evaluation", "str").get_checksum()
+
+
 def test_cancelling_a_callers_task_softcancels_only_that_membership(monkeypatch):
     """expressions.md, Cancellation: cancelling a caller's asyncio task unwinds that
     caller's wait; the evaluator's cleanup softcancels its membership, so work
@@ -547,6 +602,9 @@ def test_database_key_conflict_raises_nothing_and_the_evaluation_keeps_its_resul
     # "auto" with the input in process memory places the evaluation locally,
     # through the dispatching entry point, which records identity in the database.
     assert expression.compute(execution="auto") == expected
+    from seamless.caching import buffer_writer
+
+    buffer_writer.flush()
     assert len(session.expression_puts) >= 1
     assert reported and all(written is False for written in reported)
     assert get_expression_cache()[(source_checksum.hex(), "a", "plain", "str")] == expected
@@ -579,10 +637,96 @@ def test_explicit_local_evaluation_also_records_identity_in_the_database(monkeyp
     expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
 
     assert expression.compute(execution="local") is not None
+    from seamless.caching import buffer_writer
+
+    buffer_writer.flush()
     assert [
         (put["checksum"], put["path"], put["input_celltype"], put["celltype"])
         for put in session.expression_puts
     ] == [(source_checksum.hex(), "a", "plain", "str")]
+
+
+def test_explicit_local_async_evaluation_also_records_identity_in_the_database(
+    monkeypatch,
+):
+    """The async local evaluator records the expression identity it produces."""
+    pytest.importorskip("seamless_remote")
+    from seamless_remote import database_remote
+    from seamless_remote.database_client import DatabaseClient
+
+    session = _ConflictSession()
+    client = DatabaseClient(readonly=False)
+    client.url = "http://database.invalid"
+    client._initialized = True
+    client._get_session = lambda: session
+    monkeypatch.setattr(database_remote, "_read_database_clients", [])
+    monkeypatch.setattr(database_remote, "_write_database_clients", [client])
+
+    source = Buffer({"a": "recorded asynchronously"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
+
+    async def compute():
+        return await expression.compute_async(execution="local")
+
+    assert asyncio.run(compute()) is not None
+    from seamless.caching import buffer_writer
+
+    buffer_writer.flush()
+    assert [
+        (put["checksum"], put["path"], put["input_celltype"], put["celltype"])
+        for put in session.expression_puts
+    ] == [(source_checksum.hex(), "a", "plain", "str")]
+
+
+def test_expression_result_registration_failures_are_visible(monkeypatch):
+    from seamless.caching import buffer_writer
+
+    def fail_registration(*args, **kwargs):
+        raise RuntimeError("writer failed")
+
+    monkeypatch.setattr(buffer_writer, "register_expression_result", fail_registration)
+    key = expression_mod.ExpressionKey(_ANY, "a", "plain", "str")
+    cache_key = (key.input_checksum.hex(), key.path, key.input_celltype, key.celltype)
+
+    with pytest.raises(RuntimeError, match="writer failed"):
+        expression_mod._record_expression_result(key, cache_key, _ANY)
+
+
+def test_worker_dispatch_expression_records_result_on_the_executing_side(
+    monkeypatch,
+):
+    pytest.importorskip("seamless_transformer")
+    from seamless.caching import buffer_writer
+    transformer_client = pytest.importorskip("seamless_dask.transformer_client")
+    from seamless_transformer import worker
+
+    expression_rows = {}
+    calls = []
+    source = Buffer({"a": "recorded by worker"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    install_fake_remotes(
+        monkeypatch,
+        expression_rows,
+        {},
+        calls,
+        jobserver_available=False,
+    )
+    monkeypatch.setattr(
+        transformer_client, "get_seamless_dask_client", lambda: None
+    )
+
+    result = asyncio.run(
+        worker.dispatch_expression(
+            source_checksum, "a", "plain", "str", scratch=True
+        )
+    )
+    buffer_writer.flush()
+
+    assert expression_rows[(source_checksum.hex(), "a", "plain", "str")] == result
+    assert calls.count("database:set") == 1
 
 
 def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
@@ -612,11 +756,11 @@ def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
 
         monkeypatch.setattr(Checksum, "resolution", gated)
         first = asyncio.create_task(
-            evaluate_expression_async(source_checksum, "missing", "plain", "plain")
+            evaluate_expression_local_async(source_checksum, "missing", "plain", "plain")
         )
         await asyncio.wait_for(entered.wait(), 5)
         second = asyncio.create_task(
-            evaluate_expression_async(source_checksum, "missing", "plain", "plain")
+            evaluate_expression_local_async(source_checksum, "missing", "plain", "plain")
         )
         await asyncio.sleep(0)
         gate.set()
@@ -631,7 +775,7 @@ def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
     assert (source_checksum.hex(), "missing", "plain", "plain") not in get_expression_cache()
 
     with pytest.raises(ExpressionEvaluationError):
-        evaluate_expression(source_checksum, "missing", "plain", "plain")
+        evaluate_expression_local(source_checksum, "missing", "plain", "plain")
     assert applied == 2
 
 
@@ -640,7 +784,7 @@ def test_explicit_remote_without_seamless_remote_raises_expression_error(monkeyp
     monkeypatch.setitem(sys.modules, "seamless_remote", None)
     with pytest.raises(ExpressionEvaluationError):
         asyncio.run(
-            evaluate_expression_remote(
+            evaluate_expression_placed(
                 Checksum("d" * 64), "a", "plain", "str", execution="remote"
             )
         )
@@ -667,7 +811,7 @@ def test_client_without_jobserver_dispatches_to_the_daskserver(monkeypatch):
     )
 
     result = asyncio.run(
-        evaluate_expression_remote(source_checksum, "a", "plain", "str", execution="auto")
+        evaluate_expression_placed(source_checksum, "a", "plain", "str", execution="auto")
     )
     assert result == result_checksum
     # The scratch flag is the requester's decision; this direct call names no

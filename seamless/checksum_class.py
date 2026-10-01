@@ -390,7 +390,7 @@ class Checksum:
         for expression in expression_candidates:
             try:
                 from seamless.checksum.expression import (
-                    evaluate_expression_async,
+                    evaluate_expression_local_async,
                 )
 
                 input_checksum = Checksum(expression["checksum"])
@@ -401,7 +401,7 @@ class Checksum:
                     await input_checksum.fingertip()
                 except CacheMissError:
                     pass
-                result = await evaluate_expression_async(
+                result = await evaluate_expression_local_async(
                     input_checksum,
                     path,
                     source_celltype,
@@ -410,18 +410,6 @@ class Checksum:
                 )
                 if Checksum(result) != self:
                     continue
-                try:
-                    from seamless_remote import database_remote
-
-                    await database_remote.set_expression_result(
-                        input_checksum,
-                        path,
-                        source_celltype,
-                        celltype,
-                        self,
-                    )
-                except Exception:
-                    pass
                 return await self.resolution(celltype)
             except Exception:
                 continue

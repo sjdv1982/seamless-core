@@ -1138,7 +1138,7 @@ def _available_input_checksum(value, *, scratch=True):
             result = concrete._compute_for_owner(scratch=scratch)
         finally:
             concrete._release_refholds()
-        return value._publish_result(result) if result is not None else None
+        return value._hold_result(result) if result is not None else None
     if isinstance(value, Cell):
         return value.checksum
     result_getter = getattr(value, "_result_checksum_internal", None)

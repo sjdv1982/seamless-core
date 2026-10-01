@@ -14,8 +14,8 @@ from seamless.checksum.conversion import SeamlessConversionError, conversion_tri
 from seamless.checksum.expression import (
     ExpressionKey,
     choose_expression_evaluation_location,
-    evaluate_expression,
-    evaluate_expression_async,
+    evaluate_expression_local,
+    evaluate_expression_local_async,
     get_expression_cache,
 )
 
@@ -301,7 +301,7 @@ def test_construct_and_evaluate_expression_sync_without_fetch(monkeypatch):
         "_get_local_buffer",
         lambda *args, **kwargs: _raise_if_fetched(),
     )
-    result = evaluate_expression(
+    result = evaluate_expression_local(
         key.input_checksum,
         key.path,
         key.input_celltype,
@@ -336,7 +336,7 @@ def test_construct_and_evaluate_expression_async_fetches_once(monkeypatch):
         lambda *args, **kwargs: _raise_if_fetched(),
     )
     result = asyncio.run(
-        evaluate_expression_async(
+        evaluate_expression_local_async(
             key.input_checksum,
             key.path,
             key.input_celltype,
