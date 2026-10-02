@@ -265,10 +265,12 @@ class Expression:
             # An intermediate takes the scratch of what it feeds; it is asked
             # for its checksum only.
             input_checksum = input_ref._evaluate_internal(
-                execution=execution, scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=not scratch
             )
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency()
+            input_ref._compute_dependency(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         else:
             input_checksum = self.input_checksum
@@ -341,13 +343,17 @@ class Expression:
         input_ref = self._input_ref
         if isinstance(input_ref, Expression):
             input_checksum = await input_ref._evaluate_internal_async(
-                execution=execution, scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=not scratch
             )
         elif hasattr(input_ref, "_compute_dependency_async"):
-            await input_ref._compute_dependency_async(require_value=False)
+            await input_ref._compute_dependency_async(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency()
+            input_ref._compute_dependency(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         else:
             input_checksum = self.input_checksum
