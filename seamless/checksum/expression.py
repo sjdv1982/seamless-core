@@ -144,6 +144,9 @@ def evaluate_expression_local(
 
     With ``materialize``, a cached result checksum is an answer only when its
     buffer is in this process; otherwise the Expression is evaluated again.
+    The same holds for the result of an in-flight evaluation that this call
+    joined: when its buffer is not in this process (it was dispatched), the
+    Expression is evaluated here, without joining again.
     """
 
     if validator is not None or validator_language is not None:
@@ -187,26 +190,15 @@ def evaluate_expression_local(
                 "Cannot block on a local Expression evaluation in its running event loop"
             )
         try:
-            return active.result_future.result()
+            result = active.result_future.result()
         finally:
             softcancel_expression(cache_key, member)
+        if materialize and not _has_local_buffer(result):
+            return _evaluate_expression_local_unshared(key, cache_key)
+        return result
 
     try:
-        steps = parse_path(key.path)
-        get_buffer = _local_buffer_getter(key.input_checksum)
-        input_buffer = get_buffer() if steps else None
-        from .hash_type_validation import validate_expression
-
-        validate_expression(
-            key.input_checksum,
-            buffer=input_buffer,
-            source_celltype=key.input_celltype,
-            path_steps=steps,
-            target_celltype=key.celltype,
-        )
-        result = _evaluate_expression_after_validation(
-            key, input_buffer, steps, cache_key, get_buffer
-        )
+        result = _evaluate_expression_local_unshared(key, cache_key)
     except BaseException as exc:
         if not active.result_future.done():
             active.result_future.set_exception(exc)
@@ -226,6 +218,27 @@ def evaluate_expression_local(
         active._release_refholds()
 
 
+def _evaluate_expression_local_unshared(
+    key: ExpressionKey, cache_key: tuple[str, str, str, str]
+) -> Checksum:
+    """Evaluate in this thread, outside any member set."""
+    steps = parse_path(key.path)
+    get_buffer = _local_buffer_getter(key.input_checksum)
+    input_buffer = get_buffer() if steps else None
+    from .hash_type_validation import validate_expression
+
+    validate_expression(
+        key.input_checksum,
+        buffer=input_buffer,
+        source_celltype=key.input_celltype,
+        path_steps=steps,
+        target_celltype=key.celltype,
+    )
+    return _evaluate_expression_after_validation(
+        key, input_buffer, steps, cache_key, get_buffer
+    )
+
+
 async def evaluate_expression_local_async(
     input_checksum,
     path,
@@ -237,7 +250,12 @@ async def evaluate_expression_local_async(
     member_id=None,
     materialize=False,
 ):
-    """Share one local evaluator task for each complete Expression identity."""
+    """Share one local evaluator task for each complete Expression identity.
+
+    With ``materialize``, a cached result checksum, or the result of a joined
+    evaluation, is an answer only when its buffer is in this process;
+    otherwise the Expression is evaluated here, without joining again.
+    """
     if validator is not None or validator_language is not None:
         raise NotImplementedError("Expression validators are not implemented yet")
     expression_key = ExpressionKey(
@@ -311,9 +329,16 @@ async def evaluate_expression_local_async(
         _active_expressions[key] = active
         waiter = _join_expression(active, member)
     try:
-        return await asyncio.shield(waiter)
+        result = await asyncio.shield(waiter)
     finally:
         softcancel_expression(key, member)
+    if materialize and not _has_local_buffer(result):
+        # The joined evaluation was dispatched, so its buffer is not here.
+        # A materializing caller evaluates here, without joining again.
+        return await _evaluate_expression_async(
+            input_checksum, path, input_celltype, celltype, materialize=True
+        )
+    return result
 
 
 _expression_evaluations = 0

@@ -534,16 +534,19 @@ class Expression:
         self._enable_result_holding()
         return self._evaluate_internal(execution=execution)
 
-    def _compute_for_owner(self, *, scratch: bool) -> Checksum | None:
+    def _compute_for_owner(self, *, scratch: bool, execution: str = "auto") -> Checksum | None:
         """``compute()`` on behalf of an owner (a Cell) with its own scratch policy.
 
         A bare Expression asking for a checksum is always scratch; an owner's
         request carries the owner's policy, so a non-scratch Cell's dispatched
         Expression is materialized and written by the executing side. It asks
-        for a checksum only, so any recorded checksum answers it.
+        for a checksum only, so any recorded checksum answers it. ``execution``
+        is the placement; a bound handle passes its Context's setting.
         """
         self._enable_result_holding()
-        return self._evaluate_internal(scratch=scratch, materialize=False)
+        return self._evaluate_internal(
+            execution=execution, scratch=scratch, materialize=False
+        )
 
     async def _compute_for_owner_async(self, *, scratch: bool) -> Checksum | None:
         self._enable_result_holding()

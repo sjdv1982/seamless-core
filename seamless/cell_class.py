@@ -1107,13 +1107,17 @@ def _capture_workflow_source(value: Any) -> Any:
 __all__ = ["Cell", "CellBase"]
 
 
-def _available_input_checksum(value, *, scratch=True):
+def _available_input_checksum(value, *, scratch=True, execution="auto"):
     """Read an input result without starting transformation work.
 
     ``scratch`` is the requesting owner's policy. A non-scratch owner's
     dispatched evaluation is materialized and written by the executing side;
     an input read for its checksum alone stays scratch. Either way this is a
     checksum request, so any recorded checksum answers it.
+
+    ``execution`` is the Expression placement (``"auto"``, ``"local"`` or
+    ``"remote"``). A standalone Cell always uses ``"auto"``; a bound handle
+    passes its Context's ``expression_execution``.
     """
     from .checksum_class import Checksum
 
@@ -1122,9 +1126,9 @@ def _available_input_checksum(value, *, scratch=True):
     if isinstance(value, Expression):
         if isinstance(value._input_ref, Checksum):
             return value._evaluate_internal(
-                execution="auto", scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=False
             )
-        checksum = _available_input_checksum(value._input_ref)
+        checksum = _available_input_checksum(value._input_ref, execution=execution)
         if checksum is None:
             return None
         # Freeze the available input so compute cannot start (or wait on) a
@@ -1135,7 +1139,7 @@ def _available_input_checksum(value, *, scratch=True):
             validator_language=value.validator_language,
         )
         try:
-            result = concrete._compute_for_owner(scratch=scratch)
+            result = concrete._compute_for_owner(scratch=scratch, execution=execution)
         finally:
             concrete._release_refholds()
         return value._hold_result(result) if result is not None else None

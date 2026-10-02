@@ -497,6 +497,80 @@ def test_sync_local_evaluation_joins_member_set_between_threads(monkeypatch):
     assert first_result == Buffer("threaded local evaluation", "str").get_checksum()
 
 
+def _dispatched_scratch_evaluation_setup(monkeypatch, value):
+    """An Expression whose result a gated scratch dispatch will answer without
+    leaving the buffer in this process."""
+    source = Buffer({"a": value}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    result_checksum = Buffer(value, "str").get_checksum()
+    drop_buffer(result_checksum)
+    calls = []
+    jobserver_results = {(source_checksum.hex(), "a", "plain", "str"): result_checksum}
+    return source_checksum, result_checksum, calls, jobserver_results
+
+
+@pytest.mark.parametrize("form", ["async", "sync"])
+def test_materializing_local_caller_that_joins_a_dispatch_evaluates_here(monkeypatch, form):
+    """expressions.md, The materialize mode: a materializing caller may join an
+    in-flight evaluation, but when the joined result's buffer is not in this
+    process it evaluates here, without joining again, and never re-dispatches."""
+    source_checksum, result_checksum, calls, jobserver_results = (
+        _dispatched_scratch_evaluation_setup(monkeypatch, f"joined by {form}")
+    )
+    cache_key = (source_checksum.hex(), "a", "plain", "str")
+
+    async def main():
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        install_fake_remotes(
+            monkeypatch,
+            {},
+            jobserver_results,
+            calls,
+            run_expression_gate=gate,
+            run_expression_started=started,
+        )
+        dispatched = asyncio.create_task(
+            evaluate_expression_placed(
+                source_checksum, "a", "plain", "str", execution="remote", scratch=True
+            )
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        if form == "async":
+            joiner = asyncio.create_task(
+                evaluate_expression_local_async(
+                    source_checksum, "a", "plain", "str", materialize=True
+                )
+            )
+        else:
+            joiner = asyncio.create_task(
+                asyncio.to_thread(
+                    evaluate_expression_local,
+                    source_checksum,
+                    "a",
+                    "plain",
+                    "str",
+                    materialize=True,
+                )
+            )
+        for _ in range(500):
+            active = _active_expressions.get(cache_key)
+            if active is not None and len(active.members) == 2:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the local caller did not join the dispatch")
+        gate.set()
+        return await dispatched, await asyncio.wait_for(joiner, 5)
+
+    dispatched_result, joined_result = asyncio.run(main())
+
+    assert dispatched_result == joined_result == result_checksum
+    assert calls.count("jobserver:run") == 1
+    assert expression_mod._has_local_buffer(joined_result)
+
+
 def test_cancelling_a_callers_task_softcancels_only_that_membership(monkeypatch):
     """expressions.md, Cancellation: cancelling a caller's asyncio task unwinds that
     caller's wait; the evaluator's cleanup softcancels its membership, so work
