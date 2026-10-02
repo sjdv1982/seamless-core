@@ -35,10 +35,10 @@ def test_public_hold_after_internal_publication_is_acquired_once():
     buffer = Buffer(b"internal publication")
     checksum = buffer.get_checksum()
     expression = Expression(checksum, "", input_celltype="text", celltype="text")
-    result = __import__("seamless.checksum.expression", fromlist=["evaluate_expression"]).evaluate_expression(
+    result = __import__("seamless.checksum.expression", fromlist=["evaluate_expression_local"]).evaluate_expression_local(
         checksum, "", "text", "text"
     )
-    expression._publish_result(result)
+    expression._hold_result(result)
     assert get_buffer_cache().reference_snapshot().get(result, (0, 0, False))[0] == 0
     expression._enable_result_holding()
     assert get_buffer_cache().reference_snapshot()[result][0] == 1
@@ -54,7 +54,7 @@ def test_equal_expressions_are_registered_and_released_independently():
     second = Expression(checksum, "", input_celltype="text", celltype="text")
     assert first == second
     result = first.compute()
-    second._publish_result(result)
+    second._hold_result(result)
     second._enable_result_holding()
     assert get_buffer_cache().reference_snapshot()[result][0] == 2  # one result claim each
     first._release_refholds()

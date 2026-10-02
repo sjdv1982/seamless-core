@@ -106,6 +106,7 @@ def test_query_methods_cover_representative_capabilities():
     raw_bytes = HashType(Kind.RAW_BYTES, Length.SHORT)
     json_object = HashType(Kind.JSON_OBJECT, Length.SHORT)
     json_string = HashType(Kind.JSON_STRING, Length.SHORT)
+    json_null = HashType(Kind.JSON_NULL, Length.SHORT)
     number = HashType(Kind.JSON_NUMBER, Length.SHORT, flags=Flag.NUMERIC_SCALAR)
     numpy_vector = HashType(Kind.NUMPY, Length.MEDIUM, DType.NUMERIC, Rank.D1)
     structured_scalar = HashType(
@@ -119,6 +120,15 @@ def test_query_methods_cover_representative_capabilities():
     assert json_object.deserializable_as("mixed", checksum=checksum)
     assert not json_object.deserializable_as("binary", checksum=checksum)
     assert number.deserializable_as("float", checksum=checksum)
+    assert json_null.is_utf8 and json_null.is_json
+    assert json_null.mic == "plain"
+    assert json_null.deserializable_as("plain", checksum=checksum)
+    assert json_null.deserializable_as("mixed", checksum=checksum)
+    assert json_null.deserializable_as("str", checksum=checksum) is False
+    assert json_null.capabilities("plain") == set()
+    assert json_null.capabilities("mixed") == set()
+    assert json_null.has_string_items("plain") is False
+    assert json_null.has_string_items("mixed") is False
     assert json_string.capabilities("str") == {"SEQ"}
     assert capabilities(json_object, "plain") == {"MAP"}
     assert capabilities(numpy_vector, "binary") == {"SEQ"}

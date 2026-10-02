@@ -130,7 +130,7 @@ def choose_expression_evaluation_location(
     return "local"
 
 
-def evaluate_expression(
+def evaluate_expression_local(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
@@ -144,6 +144,9 @@ def evaluate_expression(
 
     With ``materialize``, a cached result checksum is an answer only when its
     buffer is in this process; otherwise the Expression is evaluated again.
+    The same holds for the result of an in-flight evaluation that this call
+    joined: when its buffer is not in this process (it was dispatched), the
+    Expression is evaluated here, without joining again.
     """
 
     if validator is not None or validator_language is not None:
@@ -160,6 +163,65 @@ def evaluate_expression(
         _tempref_expression_result(cached)
         return cached
 
+    member = object()
+    owns_evaluation = False
+    with _active_expression_lock:
+        active = _active_expressions.get(cache_key) or _lingering_expressions.pop(
+            cache_key, None
+        )
+        if active is None or active.result_future.done():
+            active = _ActiveExpression(concurrent.futures.Future(), None, set())
+            active.hold_input(key.input_checksum)
+            _active_expressions[cache_key] = active
+            owns_evaluation = True
+        _active_expressions[cache_key] = active
+        active.members.add(member)
+
+    if not owns_evaluation:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if active.task is not None and active.task.get_loop() is running_loop:
+            softcancel_expression(cache_key, member)
+            from seamless.error_envelope import RunningLoopRefusal
+
+            raise RunningLoopRefusal(
+                "Cannot block on a local Expression evaluation in its running event loop"
+            )
+        try:
+            result = active.result_future.result()
+        finally:
+            softcancel_expression(cache_key, member)
+        if materialize and not _has_local_buffer(result):
+            return _evaluate_expression_local_unshared(key, cache_key)
+        return result
+
+    try:
+        result = _evaluate_expression_local_unshared(key, cache_key)
+    except BaseException as exc:
+        if not active.result_future.done():
+            active.result_future.set_exception(exc)
+        raise
+    else:
+        if not active.result_future.done():
+            active.result_future.set_result(result)
+        return result
+    finally:
+        with _active_expression_lock:
+            if _active_expressions.get(cache_key) is active:
+                _active_expressions.pop(cache_key, None)
+            if _lingering_expressions.get(cache_key) is active:
+                _lingering_expressions.pop(cache_key, None)
+            if active.linger is not None:
+                active.linger.cancel()
+        active._release_refholds()
+
+
+def _evaluate_expression_local_unshared(
+    key: ExpressionKey, cache_key: tuple[str, str, str, str]
+) -> Checksum:
+    """Evaluate in this thread, outside any member set."""
     steps = parse_path(key.path)
     get_buffer = _local_buffer_getter(key.input_checksum)
     input_buffer = get_buffer() if steps else None
@@ -177,7 +239,7 @@ def evaluate_expression(
     )
 
 
-async def evaluate_expression_async(
+async def evaluate_expression_local_async(
     input_checksum,
     path,
     input_celltype,
@@ -190,8 +252,9 @@ async def evaluate_expression_async(
 ):
     """Share one local evaluator task for each complete Expression identity.
 
-    With ``materialize``, a cached result checksum is an answer only when its
-    buffer is in this process; otherwise the Expression is evaluated again.
+    With ``materialize``, a cached result checksum, or the result of a joined
+    evaluation, is an answer only when its buffer is in this process;
+    otherwise the Expression is evaluated here, without joining again.
     """
     if validator is not None or validator_language is not None:
         raise NotImplementedError("Expression validators are not implemented yet")
@@ -266,9 +329,16 @@ async def evaluate_expression_async(
         _active_expressions[key] = active
         waiter = _join_expression(active, member)
     try:
-        return await asyncio.shield(waiter)
+        result = await asyncio.shield(waiter)
     finally:
         softcancel_expression(key, member)
+    if materialize and not _has_local_buffer(result):
+        # The joined evaluation was dispatched, so its buffer is not here.
+        # A materializing caller evaluates here, without joining again.
+        return await _evaluate_expression_async(
+            input_checksum, path, input_celltype, celltype, materialize=True
+        )
+    return result
 
 
 _expression_evaluations = 0
@@ -361,7 +431,7 @@ def _has_daskserver():
     return has_daskserver()
 
 
-async def evaluate_expression_remote(
+async def evaluate_expression_placed(
     input_checksum: Checksum | str | bytes,
     path: str,
     input_celltype: str,
@@ -468,7 +538,7 @@ async def evaluate_expression_remote(
                 if not jobserver_remote.has_jobserver() and not _has_daskserver():
                     location = "local"
     if location == "local":
-        result = await evaluate_expression_async(
+        result = await evaluate_expression_local_async(
             key.input_checksum,
             key.path,
             key.input_celltype,
@@ -501,14 +571,6 @@ async def evaluate_expression_remote(
     result = Checksum(result)
     _expression_cache[cache_key] = result
     _tempref_expression_result(result)
-    if database_remote is not None:
-        await database_remote.set_expression_result(
-            key.input_checksum,
-            key.path,
-            key.input_celltype,
-            key.celltype,
-            result,
-        )
     return result
 
 
@@ -667,6 +729,10 @@ def softcancel_expression(cache_key, member_id) -> bool:
         waiter = active.waiters.pop(member_id, None)
         if waiter is not None:
             waiter.get_loop().call_soon_threadsafe(waiter.cancel)
+        if not active.members and active.task is None:
+            # A synchronous owner cannot be cancelled; retain its shared
+            # future so a later caller can still join the work in progress.
+            return True
         if not active.members:
             _active_expressions.pop(cache_key, None)
             _lingering_expressions[cache_key] = active
@@ -703,13 +769,13 @@ def _evaluate_expression_after_validation(
     if not steps and is_null(canonicalize_checksum(key.input_checksum, key.celltype)):
         result_buffer = Buffer(NULL_BUFFER)
         result = result_buffer.get_checksum()
-        _expression_cache[cache_key] = result
+        _record_expression_result(key, cache_key, result)
         _tempref_expression_result(result, buffer=result_buffer, produced=True)
         return result
     if key.path == "" and key.input_celltype == key.celltype:
         # Validation rejects known structural incompatibilities without requiring
         # source content for an identity expression.
-        _expression_cache[cache_key] = key.input_checksum
+        _record_expression_result(key, cache_key, key.input_checksum)
         _tempref_expression_result(key.input_checksum, buffer=input_buffer)
         return key.input_checksum
 
@@ -745,7 +811,7 @@ def _evaluate_expression_after_validation(
             if result_buffer.get_checksum() != result_checksum:
                 raise ExpressionEvaluationError("Conversion result checksum mismatch")
             _expression_result_buffers[result_checksum] = result_buffer
-        _expression_cache[cache_key] = result_checksum
+        _record_expression_result(key, cache_key, result_checksum)
         _tempref_expression_result(result_checksum, buffer=result_buffer, produced=True)
         return result_checksum
 
@@ -762,7 +828,7 @@ def _evaluate_expression_after_validation(
             from .hash_type_validation import validate_deserializable_as
 
             validate_deserializable_as(child, key.celltype)
-            _expression_cache[cache_key] = child
+            _record_expression_result(key, cache_key, child)
             _tempref_expression_result(child)
             return child
     if key.input_celltype == "binary" and steps:
@@ -779,10 +845,31 @@ def _evaluate_expression_after_validation(
 
     result_buffer = _serialize_expression_result(value, key.celltype)
     result_checksum = result_buffer.get_checksum()
-    _expression_cache[cache_key] = result_checksum
+    _record_expression_result(key, cache_key, result_checksum)
     _expression_result_buffers[result_checksum] = result_buffer
     _tempref_expression_result(result_checksum, buffer=result_buffer, produced=True)
     return result_checksum
+
+
+def _record_expression_result(
+    key: ExpressionKey,
+    cache_key: tuple[str, str, str, str],
+    result: Checksum,
+) -> None:
+    """Record a locally produced result in process and database caches."""
+    result = Checksum(result)
+    _expression_cache[cache_key] = result
+    from seamless.caching import buffer_writer
+
+    buffer_writer.register_expression_result(
+        (
+            key.input_checksum.hex(),
+            key.path,
+            key.input_celltype,
+            key.celltype,
+        ),
+        result,
+    )
 
 
 def _tempref_expression_result(
@@ -1048,7 +1135,12 @@ def _serialize_expression_result(value: Any, celltype: str) -> Buffer:
         import numpy as np
 
         return Buffer(np.array(value), "binary")
-    result = Buffer(value, celltype)
+    try:
+        result = Buffer(value, celltype)
+    except Exception as exc:
+        raise ExpressionEvaluationError(
+            f"Expression result is not serializable as {celltype}"
+        ) from exc
     if celltype == "binary":
         from seamless.util.mixed import MAGIC_NUMPY
 
@@ -1115,11 +1207,15 @@ def _apply_step(value: Any, step: tuple[str, Any]) -> Any:
             return value[payload]
         if kind == "item":
             if isinstance(payload, str):
-                if isinstance(value, dict):
+                # A string key addresses a dict key or a structured-array
+                # field, and nothing else: never an attribute of the value.
+                if isinstance(value, dict) or (
+                    hasattr(value, "dtype") and getattr(value.dtype, "fields", None)
+                ):
                     return value[payload]
-                if hasattr(value, "dtype") and getattr(value.dtype, "fields", None):
-                    return value[payload]
-                return getattr(value, payload)
+                raise TypeError(
+                    f"{type(value).__name__} has no string-keyed members"
+                )
             return value[payload]
     except Exception as exc:
         raise ExpressionEvaluationError(
@@ -1131,9 +1227,9 @@ def _apply_step(value: Any, step: tuple[str, Any]) -> Any:
 __all__ = [
     "ExpressionEvaluationError",
     "choose_expression_evaluation_location",
-    "evaluate_expression",
-    "evaluate_expression_async",
-    "evaluate_expression_remote",
+    "evaluate_expression_local",
+    "evaluate_expression_local_async",
+    "evaluate_expression_placed",
     "get_expression_cache",
     "parse_path",
     "resolve_expression_value",

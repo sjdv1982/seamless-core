@@ -56,6 +56,7 @@ def test_packed_field_values_and_bit_positions_are_stable():
         "UNTESTED": 9,
         "UTF8_UNTESTED": 10,
         "JSON_UNTESTED": 11,
+        "JSON_NULL": 12,
     }
     assert {member.name: member.value for member in Length} == {
         "SHORT": 0,
@@ -107,6 +108,11 @@ def test_packed_field_values_and_bit_positions_are_stable():
             Flag.NUMPY_BYTES,
         ),
         HashType(Kind.JSON_NUMBER, Length.SHORT),
+        HashType(Kind.JSON_NULL, Length.SHORT, DType.NUMERIC),
+        HashType(Kind.JSON_NULL, Length.SHORT, rank=Rank.D1),
+        HashType(Kind.JSON_NULL, Length.SHORT, flags=Flag.NUMERIC_SCALAR),
+        HashType(Kind.JSON_NULL, Length.SHORT, flags=Flag.NUMPY_BYTES),
+        HashType(Kind.JSON_NULL, Length.SHORT, flags=Flag.SEMANTIC),
         HashType(
             Kind.JSON_OBJECT,
             Length.SHORT,
@@ -131,16 +137,22 @@ CONCRETE_WORDS = {
     "json-number": HashType(
         Kind.JSON_NUMBER, Length.EQ64, flags=Flag.NUMERIC_SCALAR
     ),
+    "json-null": HashType(Kind.JSON_NULL, Length.EQ64),
 }
 
 CONCRETE_DESERIALIZATION = {
     "bytes": set(CONCRETE_WORDS),
-    "text": {"raw-text", "json-object", "json-array", "json-string", "json-number"},
+    "text": {
+        "raw-text", "json-object", "json-array", "json-string", "json-number",
+        "json-null",
+    },
     "python": set(),
     "ipython": set(),
     "yaml": set(),
-    "plain": {"json-object", "json-array", "json-string", "json-number"},
-    "str": {"json-number"},
+    "plain": {
+        "json-object", "json-array", "json-string", "json-number", "json-null"
+    },
+    "str": {"json-number", "json-string"},
     "int": {"json-number"},
     "float": {"json-number"},
     "binary": {"numpy"},
@@ -150,6 +162,7 @@ CONCRETE_DESERIALIZATION = {
         "json-array",
         "json-string",
         "json-number",
+        "json-null",
     },
     "checksum": set(),
     "bool": set(),
@@ -159,15 +172,17 @@ CONCRETE_DESERIALIZATION = {
 CONCRETE_UNKNOWN = {
     "mixed": {"mixed-object", "mixed-array"},
     "python": {
-        "raw-text", "json-object", "json-array", "json-string", "json-number"
+        "raw-text", "json-object", "json-array", "json-string", "json-number",
+        "json-null",
     },
     "ipython": {
-        "raw-text", "json-object", "json-array", "json-string", "json-number"
+        "raw-text", "json-object", "json-array", "json-string", "json-number",
+        "json-null",
     },
     "yaml": {
-        "raw-text", "json-object", "json-array", "json-string", "json-number"
+        "raw-text", "json-object", "json-array", "json-string", "json-number",
+        "json-null",
     },
-    "str": {"json-string"},
     "checksum": {"raw-text", "json-number"},
 }
 
@@ -211,6 +226,8 @@ def test_null_checksum_is_deserializable_as_every_celltype(raw, celltype):
         ("plain", HashType(Kind.JSON_OBJECT, Length.SHORT), {"MAP"}),
         ("plain", HashType(Kind.JSON_ARRAY, Length.SHORT), {"SEQ"}),
         ("plain", HashType(Kind.JSON_STRING, Length.SHORT), {"SEQ"}),
+        ("plain", HashType(Kind.JSON_NULL, Length.SHORT), set()),
+        ("mixed", HashType(Kind.JSON_NULL, Length.SHORT), set()),
         ("mixed", HashType(Kind.MIXED_OBJECT, Length.SHORT), {"MAP"}),
         ("mixed", HashType(Kind.MIXED_ARRAY, Length.SHORT), {"SEQ"}),
         (

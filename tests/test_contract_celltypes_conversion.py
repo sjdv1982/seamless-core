@@ -536,6 +536,28 @@ def test_reinterpretation_hash_type_proof_settles_without_fetching(
     )
 
 
+@pytest.mark.parametrize("raw", (b'"abc"', b"true ", b"false ", b"null", b"null\n"))
+def test_plain_to_str_hash_type_proof_does_not_fetch(raw):
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, "plain", "str") is False
+    assert convert_checksum(checksum, "plain", "str", _fail_if_fetched) == (
+        checksum,
+        None,
+    )
+
+
+@pytest.mark.parametrize("raw", (b" null \n", b"null\n\n"))
+def test_plain_to_str_hash_type_disproof_does_not_fetch(raw):
+    buffer = Buffer(raw)
+    checksum = buffer.get_checksum()
+
+    assert conversion_needs_buffer(checksum, "plain", "str") is False
+    with pytest.raises(SeamlessConversionError):
+        convert_checksum(checksum, "plain", "str", _fail_if_fetched)
+
+
 @pytest.mark.parametrize(
     "source,target,value",
     [
@@ -569,8 +591,6 @@ def test_reinterpretation_without_hash_type_fetches_once(source, target, value):
         ("text", "python", b"def\n", False),
         ("text", "ipython", b"def\n", True),
         ("text", "yaml", b"a: [\n", False),
-        ("plain", "str", b'"abc"', True),
-        ("plain", "str", b" null \n", False),
     ],
 )
 def test_reinterpretation_without_a_proof_fetches_and_parses(
@@ -872,7 +892,7 @@ def test_empty_path_expression_short_circuits_null_for_every_legal_pair(
     """§Executor: null input -> null result, before the executor, for every
     LEGAL pair (clarity ruling: illegal conversions remain illegal for null)."""
     from seamless.checksum import convert as convert_module
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     def engine_called(*args, **kwargs):
         raise AssertionError("executor must not be called for a null input")
@@ -883,7 +903,7 @@ def test_empty_path_expression_short_circuits_null_for_every_legal_pair(
     for target in celltypes:
         if (source, target) in conversion_forbidden:
             continue
-        assert evaluate_expression(null, "", source, target) == null
+        assert evaluate_expression_local(null, "", source, target) == null
 
 
 _NULL_FORMS = [
@@ -908,11 +928,11 @@ def test_expression_construction_refuses_null_on_every_forbidden_pair(source, ta
 
 @pytest.mark.parametrize("source,target", sorted(conversion_forbidden))
 def test_empty_path_evaluation_refuses_null_on_every_forbidden_pair(source, target):
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     get_expression_cache().clear()
     with pytest.raises(ValueError):
-        evaluate_expression(Checksum(NULL_CHECKSUM), "", source, target)
+        evaluate_expression_local(Checksum(NULL_CHECKSUM), "", source, target)
 
 
 _ILLEGAL_DEEP_PAIRS = [
@@ -944,11 +964,11 @@ def test_expression_refuses_null_on_illegal_deep_pairs(source, target):
 
 @pytest.mark.parametrize("source,target", _ILLEGAL_DEEP_PAIRS)
 def test_empty_path_evaluation_refuses_null_on_illegal_deep_pairs(source, target):
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     get_expression_cache().clear()
     with pytest.raises(ValueError):
-        evaluate_expression(Checksum(NULL_CHECKSUM), "", source, target)
+        evaluate_expression_local(Checksum(NULL_CHECKSUM), "", source, target)
 
 
 _LEGAL_DEEP_PAIRS = [
@@ -986,7 +1006,7 @@ def test_empty_path_evaluation_short_circuits_null_on_legal_deep_pairs(
     """§Null and conversion legality, legal row: a legal deep pair yields the
     canonical null without calling the executor."""
     from seamless.checksum import convert as convert_module
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     def engine_called(*args, **kwargs):
         raise AssertionError("executor must not be called for a null input")
@@ -994,14 +1014,14 @@ def test_empty_path_evaluation_short_circuits_null_on_legal_deep_pairs(
     monkeypatch.setattr(convert_module, "convert_checksum", engine_called)
     get_expression_cache().clear()
     null = Checksum(NULL_CHECKSUM)
-    assert evaluate_expression(null, "", source, target) == null
+    assert evaluate_expression_local(null, "", source, target) == null
 
 
 def test_empty_bytes_input_is_canonicalized_then_short_circuited(monkeypatch):
     """§Null and conversion legality, 'Which inputs count as null': the key
     canonicalizes empty bytes (input celltype bytes) to NULL_CHECKSUM first."""
     from seamless.checksum import convert as convert_module
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     def engine_called(*args, **kwargs):
         raise AssertionError("executor must not be called for a null input")
@@ -1010,7 +1030,7 @@ def test_empty_bytes_input_is_canonicalized_then_short_circuited(monkeypatch):
     get_expression_cache().clear()
     empty = Checksum(hashlib.sha256(b"").digest())
     for target in ("plain", "text", "checksum", "int"):
-        assert evaluate_expression(empty, "", "bytes", target) == NULL_CHECKSUM
+        assert evaluate_expression_local(empty, "", "bytes", target) == NULL_CHECKSUM
 
 
 def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeypatch):
@@ -1018,7 +1038,7 @@ def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeyp
     goes through the executor and the pair's own rule (here X->checksum stores the
     source checksum's digest, so the result is not null)."""
     from seamless.checksum import convert as convert_module
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     calls = []
     original = convert_module.convert_checksum
@@ -1030,7 +1050,7 @@ def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeyp
     monkeypatch.setattr(convert_module, "convert_checksum", spy)
     get_expression_cache().clear()
     noncanonical = Checksum(hashlib.sha256(b"null").digest())
-    result = evaluate_expression(noncanonical, "", "plain", "checksum")
+    result = evaluate_expression_local(noncanonical, "", "plain", "checksum")
     assert calls == [("plain", "checksum")]
     assert result != NULL_CHECKSUM
     assert result == Buffer(noncanonical, "checksum").get_checksum()
@@ -1040,7 +1060,7 @@ def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeyp
 def test_executor_converts_null_by_the_pair_rule_on_a_legal_pair():
     """§Null and conversion legality: the executor has no null short-circuit of
     its own for ordinary pairs; contrast with the empty-path Expression."""
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     null = Checksum(NULL_CHECKSUM)
     result_checksum, result_buffer = convert_checksum(
@@ -1049,7 +1069,7 @@ def test_executor_converts_null_by_the_pair_rule_on_a_legal_pair():
     assert result_buffer is not None
     assert result_buffer.content == NULL_CHECKSUM.encode()
     get_expression_cache().clear()
-    assert evaluate_expression(null, "", "plain", "checksum") == null
+    assert evaluate_expression_local(null, "", "plain", "checksum") == null
 
 
 # --- Deliberate imprecisions (contract) --------------------------------------
@@ -1101,20 +1121,20 @@ def test_trivial_checksums_resolve_without_cache_residency():
 def test_engine_result_is_recorded_as_the_empty_path_expression(monkeypatch):
     """§Executor: a repeated conversion is an Expression-identity cache hit."""
     from seamless.checksum import convert as convert_module
-    from seamless.checksum.expression import evaluate_expression, get_expression_cache
+    from seamless.checksum.expression import evaluate_expression_local, get_expression_cache
 
     source = Buffer("hi", "text")
     source.tempref()
     checksum = source.get_checksum()
     get_expression_cache().clear()
-    first = evaluate_expression(checksum, "", "text", "plain")
+    first = evaluate_expression_local(checksum, "", "text", "plain")
     assert first == Buffer("hi", "plain").get_checksum()
 
     def engine_called(*args, **kwargs):
         raise AssertionError("second conversion must be a cache hit")
 
     monkeypatch.setattr(convert_module, "convert_checksum", engine_called)
-    assert evaluate_expression(checksum, "", "text", "plain") == first
+    assert evaluate_expression_local(checksum, "", "text", "plain") == first
     get_expression_cache().clear()
 
 

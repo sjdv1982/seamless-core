@@ -1107,13 +1107,18 @@ def _capture_workflow_source(value: Any) -> Any:
 __all__ = ["Cell", "CellBase"]
 
 
-def _available_input_checksum(value, *, scratch=True):
-    """Read an input result without starting transformation work.
+def _available_input_checksum(value, *, scratch=True, execution="auto",
+                              materialize=False):
+    """Read an input result, starting work for a materializing value request.
 
     ``scratch`` is the requesting owner's policy. A non-scratch owner's
     dispatched evaluation is materialized and written by the executing side;
-    an input read for its checksum alone stays scratch. Either way this is a
-    checksum request, so any recorded checksum answers it.
+    an input read for its checksum alone stays scratch. A materializing
+    request refuses a recorded checksum whose bytes cannot be reached.
+
+    ``execution`` is the Expression placement (``"auto"``, ``"local"`` or
+    ``"remote"``). A standalone Cell always uses ``"auto"``; a bound handle
+    passes its Context's ``expression_execution``.
     """
     from .checksum_class import Checksum
 
@@ -1122,27 +1127,52 @@ def _available_input_checksum(value, *, scratch=True):
     if isinstance(value, Expression):
         if isinstance(value._input_ref, Checksum):
             return value._evaluate_internal(
-                execution="auto", scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=materialize
             )
-        checksum = _available_input_checksum(value._input_ref)
+        checksum = _available_input_checksum(
+            value._input_ref, scratch=scratch, execution=execution,
+            materialize=materialize)
         if checksum is None:
             return None
-        # Freeze the available input so compute cannot start (or wait on) a
-        # Transformation, even when its recorded result is already available.
+        # Freeze the resolved input before evaluating this projection; a value
+        # request may already have started its upstream Transformation.
         concrete = Expression(
             checksum, path=value.path, input_celltype=value.input_celltype,
             celltype=value.celltype, validator=value.validator,
             validator_language=value.validator_language,
         )
         try:
-            result = concrete._compute_for_owner(scratch=scratch)
+            result = concrete._evaluate_internal(
+                scratch=scratch, execution=execution, materialize=materialize)
         finally:
             concrete._release_refholds()
-        return value._publish_result(result) if result is not None else None
+        return value._hold_result(result) if result is not None else None
     if isinstance(value, Cell):
+        if materialize and value._workflow_backend is None:
+            # A direct, unconverted Cell already has the requested checksum.
+            # In particular, module has no identity Expression conversion.
+            if (
+                isinstance(value._input_ref, Checksum)
+                and not value.path
+                and value.input_celltype == value.celltype
+                and value.validator is None
+            ):
+                checksum = value.checksum
+                if checksum is not None:
+                    checksum.resolve(value.celltype)
+                return checksum
+            expression = value.build()
+            try:
+                return expression._evaluate_internal(
+                    execution=execution, scratch=scratch,
+                    materialize=materialize)
+            finally:
+                expression._release_refholds()
         return value.checksum
     result_getter = getattr(value, "_result_checksum_internal", None)
     if callable(result_getter):
+        if materialize and callable(getattr(value, "_compute_dependency", None)):
+            value._compute_dependency(require_value=True, scratch_override=False)
         return result_getter()
     return None
 

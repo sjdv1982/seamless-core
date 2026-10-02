@@ -379,7 +379,9 @@ def _possible_conversion_feasible(
             if hash_type.dtype.name == "NUMERIC":
                 return True
             return None
-        if kind in ("JSON_OBJECT", "JSON_ARRAY", "MIXED_OBJECT", "MIXED_ARRAY"):
+        if kind in (
+            "JSON_OBJECT", "JSON_ARRAY", "MIXED_OBJECT", "MIXED_ARRAY", "JSON_NULL"
+        ):
             return False
         if kind == "JSON_NUMBER" or hash_type.is_json_numeric_scalar:
             return True

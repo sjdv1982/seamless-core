@@ -49,8 +49,8 @@ def test_expression_path_capability_rejects_before_materialization():
         expression.compute()
 
 
-@pytest.mark.parametrize("raw", [b"true", b"false", b"null"])
-def test_json_constants_remain_permissive_for_positional_path_validation(raw):
+@pytest.mark.parametrize("raw", [b"true", b"false"])
+def test_json_booleans_remain_permissive_for_positional_path_validation(raw):
     buffer = Buffer(raw)
     checksum = buffer.get_checksum()
 
@@ -63,6 +63,20 @@ def test_json_constants_remain_permissive_for_positional_path_validation(raw):
     )
 
     assert hash_type.kind == Kind.JSON_STRING
+
+
+def test_json_null_rejects_positional_path_before_materialization():
+    buffer = Buffer(b"null")
+    checksum = buffer.get_checksum()
+
+    with pytest.raises(HashTypeValidationError, match="SEQ"):
+        hash_type_validation.validate_expression(
+            checksum,
+            buffer=buffer,
+            source_celltype="plain",
+            path_steps=(("item", 0),),
+            target_celltype="plain",
+        )
 
 
 def test_identity_expression_keeps_validity_gate_for_overlong_numbers():

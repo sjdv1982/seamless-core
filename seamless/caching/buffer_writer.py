@@ -22,7 +22,7 @@ import traceback
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 from dataclasses import dataclass
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Awaitable, Callable, Dict, Optional, TYPE_CHECKING
 
 from seamless import ensure_open
 
@@ -33,15 +33,15 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class _QueueEntry:
-    checksum: "Checksum"
+    checksum: "Checksum | None"
     buffer: "Buffer | None"
     future: concurrent.futures.Future
     queued: bool = False
-    hash_type: int | None = None
-    metadata_writer: object = None
+    metadata_key: tuple | None = None
+    metadata_write: Callable[[], Awaitable[object]] | None = None
 
 
-_entries: Dict["Checksum | tuple[Checksum, int]", _QueueEntry] = {}
+_entries: Dict[object, _QueueEntry] = {}
 _has_checked: Dict[str, set[str]] = {}
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _queue: Optional[asyncio.Queue[_QueueEntry]] = None
@@ -85,18 +85,41 @@ def register_hash_type(checksum, word):
         from seamless_remote import database_remote
     except ImportError:
         return
-    key = (checksum, word)
+    _register_metadata(
+        ("hash_type", checksum, word),
+        lambda: database_remote.set_hash_type(checksum, word),
+    )
+
+
+def register_expression_result(key, result):
+    """Queue an Expression-result metadata write on the existing worker."""
+    ensure_open("Expression writer register")
+    try:
+        from seamless_remote import database_remote
+    except ImportError:
+        return
+    input_hex, path, input_celltype, celltype = key
+    metadata_key = ("expression", input_hex, path, input_celltype, celltype)
+    _register_metadata(
+        metadata_key,
+        lambda: database_remote.set_expression_result(
+            input_hex, path, input_celltype, celltype, result
+        ),
+    )
+
+
+def _register_metadata(metadata_key, metadata_write):
     with _lock:
-        if key in _entries:
+        if metadata_key in _entries:
             return
         entry = _QueueEntry(
-            checksum,
-            None,
-            concurrent.futures.Future(),
-            hash_type=word,
-            metadata_writer=database_remote.set_hash_type,
+            checksum=None,
+            buffer=None,
+            future=concurrent.futures.Future(),
+            metadata_key=metadata_key,
+            metadata_write=metadata_write,
         )
-        _entries[key] = entry
+        _entries[metadata_key] = entry
     _enqueue_entry(entry)
 
 
@@ -140,14 +163,14 @@ def flush(timeout: Optional[float] = None) -> None:
         return
 
     with _lock:
-        metadata = [entry for entry in _entries.values() if entry.hash_type is not None]
+        metadata = [entry for entry in _entries.values() if entry.metadata_key is not None]
     for entry in metadata:
         entry.future.result(timeout=timeout)
 
     buffers = {
-        checksum: entry.buffer
-        for checksum, entry in list(_entries.items())
-        if entry.hash_type is None
+        entry.checksum: entry.buffer
+        for entry in list(_entries.values())
+        if entry.metadata_key is None
     }
 
     clients = []
@@ -343,7 +366,7 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
             break
         if entry.future.cancelled() or entry.future.done():
             continue
-        if buffer_remote is not None and entry.hash_type is None:
+        if buffer_remote is not None and entry.metadata_key is None:
             try:
                 await buffer_remote.promise(entry.checksum)
             except Exception:
@@ -361,8 +384,8 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
 
 async def _process_entry(entry: _QueueEntry) -> None:
     try:
-        if entry.hash_type is not None:
-            result = await entry.metadata_writer(entry.checksum, entry.hash_type)
+        if entry.metadata_key is not None:
+            result = await entry.metadata_write()
         else:
             try:
                 import seamless_remote.buffer_remote as buffer_remote
@@ -382,11 +405,7 @@ async def _process_entry(entry: _QueueEntry) -> None:
             future.set_exception(error)
     if error is None:
         with _lock:
-            key = (
-                entry.checksum
-                if entry.hash_type is None
-                else (entry.checksum, entry.hash_type)
-            )
+            key = entry.checksum if entry.metadata_key is None else entry.metadata_key
             _entries.pop(key, None)
 
 

@@ -235,7 +235,7 @@ class Expression:
             validator=self.validator,
             validator_language=self.validator_language,
         )
-        return self._publish_result(result) if result is not None else None
+        return self._hold_result(result) if result is not None else None
 
     def _evaluate_internal(
         self,
@@ -257,7 +257,7 @@ class Expression:
 
         from .checksum.expression import (
             choose_expression_evaluation_location,
-            evaluate_expression,
+            evaluate_expression_local,
         )
 
         input_ref = self._input_ref
@@ -265,10 +265,12 @@ class Expression:
             # An intermediate takes the scratch of what it feeds; it is asked
             # for its checksum only.
             input_checksum = input_ref._evaluate_internal(
-                execution=execution, scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=not scratch
             )
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency()
+            input_ref._compute_dependency(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         else:
             input_checksum = self.input_checksum
@@ -301,7 +303,7 @@ class Expression:
             and self.validator_language is None
             and not (materialize_local and not _has_local_buffer(cached))
         ):
-            return self._publish_result(cached)
+            return self._hold_result(cached)
         location = execution
         if location == "auto":
             location = choose_expression_evaluation_location(
@@ -313,7 +315,7 @@ class Expression:
             raise RunningLoopRefusal(
                 "Cannot block on remote expression evaluation in a running loop"
             )
-        result = evaluate_expression(
+        result = evaluate_expression_local(
             input_checksum,
             self.path,
             self.input_celltype,
@@ -322,32 +324,7 @@ class Expression:
             validator_language=self.validator_language,
             materialize=materialize,
         )
-        try:
-            from seamless_remote import database_remote
-        except ImportError:
-            pass
-        else:
-            try:
-                write = database_remote.set_expression_result(
-                    input_checksum,
-                    self.path,
-                    self.input_celltype,
-                    self.celltype,
-                    result,
-                )
-                try:
-                    asyncio.get_running_loop()
-                except RuntimeError:
-                    asyncio.run(write)
-                else:
-                    from .checksum_class import _run_coro_in_worker_thread
-
-                    _run_coro_in_worker_thread(write)
-            except Exception:
-                # Local evaluation remains authoritative when the optional
-                # expression database is unavailable or rejects the write.
-                pass
-        return self._publish_result(result)
+        return self._hold_result(result)
 
     async def _evaluate_internal_async(
         self,
@@ -359,27 +336,31 @@ class Expression:
         """Async counterpart of :meth:`_evaluate_internal`."""
 
         from .checksum.expression import (
-            evaluate_expression_async,
-            evaluate_expression_remote,
+            evaluate_expression_local_async,
+            evaluate_expression_placed,
         )
 
         input_ref = self._input_ref
         if isinstance(input_ref, Expression):
             input_checksum = await input_ref._evaluate_internal_async(
-                execution=execution, scratch=scratch, materialize=False
+                execution=execution, scratch=scratch, materialize=not scratch
             )
         elif hasattr(input_ref, "_compute_dependency_async"):
-            await input_ref._compute_dependency_async(require_value=False)
+            await input_ref._compute_dependency_async(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency()
+            input_ref._compute_dependency(
+                require_value=not scratch,
+                scratch_override=False if not scratch else None)
             input_checksum = input_ref._result_checksum_internal()
         else:
             input_checksum = self.input_checksum
         if input_checksum is None:
             raise ValueError("Expression input is not a concrete checksum yet")
         if execution == "local":
-            result = await evaluate_expression_async(
+            result = await evaluate_expression_local_async(
                 input_checksum,
                 self.path,
                 self.input_celltype,
@@ -390,7 +371,7 @@ class Expression:
                 materialize=not scratch if materialize is None else materialize,
             )
         else:
-            result = await evaluate_expression_remote(
+            result = await evaluate_expression_placed(
                 input_checksum,
                 self.path,
                 self.input_celltype,
@@ -402,7 +383,7 @@ class Expression:
                 materialize=materialize,
                 member_id=id(self),
             )
-        return self._publish_result(result)
+        return self._hold_result(result)
 
     def _enable_result_holding(self) -> None:
         if self._refholds_released:
@@ -413,8 +394,8 @@ class Expression:
             self._result_checksum.incref_refholder(scratch=None)
             object.__setattr__(self, "_result_refheld", True)
 
-    def _publish_result(self, result: Checksum | str | bytes | None) -> Checksum | None:
-        """Publish a result, keeping a tempref and optional user hold."""
+    def _hold_result(self, result: Checksum | str | bytes | None) -> Checksum | None:
+        """Keep a result alive with a tempref and optional user hold."""
 
         if result is None:
             return None
@@ -559,16 +540,19 @@ class Expression:
         self._enable_result_holding()
         return self._evaluate_internal(execution=execution)
 
-    def _compute_for_owner(self, *, scratch: bool) -> Checksum | None:
+    def _compute_for_owner(self, *, scratch: bool, execution: str = "auto") -> Checksum | None:
         """``compute()`` on behalf of an owner (a Cell) with its own scratch policy.
 
         A bare Expression asking for a checksum is always scratch; an owner's
         request carries the owner's policy, so a non-scratch Cell's dispatched
         Expression is materialized and written by the executing side. It asks
-        for a checksum only, so any recorded checksum answers it.
+        for a checksum only, so any recorded checksum answers it. ``execution``
+        is the placement; a bound handle passes its Context's setting.
         """
         self._enable_result_holding()
-        return self._evaluate_internal(scratch=scratch, materialize=False)
+        return self._evaluate_internal(
+            execution=execution, scratch=scratch, materialize=False
+        )
 
     async def _compute_for_owner_async(self, *, scratch: bool) -> Checksum | None:
         self._enable_result_holding()
