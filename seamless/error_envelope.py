@@ -91,6 +91,8 @@ def encode_error(exc):
                 error["checksum"] = digest
         except (TypeError, ValueError, AttributeError):
             pass
+    if kind == "cache_miss" and getattr(exc, "fingertip_category", None) is not None:
+        error["fingertip_category"] = exc.fingertip_category.wire_name
     return {"error": error}
 
 
@@ -110,9 +112,19 @@ def decode_error(payload):
         not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum)
     ):
         raise ValueError("Malformed execution error checksum")
+    category = None
+    if "fingertip_category" in error:
+        from seamless import FingertipCategory
+
+        if kind != "cache_miss":
+            raise ValueError("Malformed execution error category")
+        category = FingertipCategory.from_wire_name(error["fingertip_category"])
     cls = _kinds().get(kind)
     if cls is None:
         return WorkflowExecutionError(message, kind=kind)
+    if kind == "cache_miss":
+        args = (Checksum(checksum),) if checksum is not None else ((message,) if message else ())
+        return cls(*args, fingertip_category=category)
     if checksum is not None:
         return cls(Checksum(checksum))
     if kind == "cache_miss" and not message:

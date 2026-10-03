@@ -2,10 +2,37 @@ import os
 import signal
 import sys
 from typing import Callable, List
+from enum import IntEnum
+
+
+class FingertipCategory(IntEnum):
+    MATERIALIZATION = 1
+    FAILED_TRANSFORMATION = 2
+    IRREPRODUCIBLE_TRANSFORMATION = 3
+    IRREPRODUCIBLE_EXPRESSION = 4
+
+    @property
+    def wire_name(self):
+        return self.name.lower()
+
+    @classmethod
+    def from_wire_name(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("Invalid fingertip category")
+        for category in cls:
+            if category.wire_name == value:
+                return category
+        raise ValueError("Invalid fingertip category")
 
 
 class CacheMissError(Exception):
     """Exception for when a checksum cannot be mapped to a buffer"""
+
+    def __init__(self, *args, fingertip_category=None):
+        super().__init__(*args)
+        self.fingertip_category = (
+            FingertipCategory(fingertip_category) if fingertip_category is not None else None
+        )
 
     @property
     def checksum(self):
@@ -91,6 +118,7 @@ Cell = _Cell
 Cell.__module__ = __name__
 
 __all__ = [
+    "FingertipCategory",
     "Checksum",
     "Buffer",
     "Expression",
