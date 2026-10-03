@@ -327,8 +327,9 @@ class CellBase:
         if getattr(self, "_refholds_released", False):
             return ()
         claims = []
-        if isinstance(self._input_ref, Checksum):
-            claims.append((self._input_ref, "input"))
+        input_ref = getattr(self, "_standalone_input_ref", None)
+        if isinstance(input_ref, Checksum):
+            claims.append((input_ref, "input"))
         result = getattr(self, "_standalone_result_checksum", None)
         if result is not None:
             claims.append((result, "result"))
@@ -340,7 +341,7 @@ class CellBase:
         object.__setattr__(self, "_refholds_released", True)
         from .checksum_class import Checksum
 
-        input_ref = getattr(self, "_input_ref", None)
+        input_ref = getattr(self, "_standalone_input_ref", None)
         if isinstance(input_ref, Checksum):
             input_ref.decref_refholder()
         self._set_result_checksum(None)
