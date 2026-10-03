@@ -552,6 +552,17 @@ async def evaluate_expression_placed(
                 if not jobserver_remote.has_jobserver() and not _has_daskserver():
                     location = "local"
     if location == "local":
+        if (
+            known is not None
+            and needs_input
+            and materialize_input is None
+            and not await _result_reachable(key.input_checksum)
+        ):
+            # Without the direct input, this cached result cannot be reproduced.
+            # Report the requested result; recovering it is Checksum.fingertip()'s job.
+            from seamless import CacheMissError
+
+            raise CacheMissError(known)
         if (needs_input and not input_materialized_here
                 and not await _result_reachable(key.input_checksum)):
             from seamless import CacheMissError
