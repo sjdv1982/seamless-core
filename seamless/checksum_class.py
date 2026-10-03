@@ -307,7 +307,7 @@ class Checksum:
 
     async def fingertip(self, celltype=None):
         """Resolve locally, or report the highest failure encountered in recovery."""
-        from seamless import FingertipCategory as Category
+        from seamless import FingertipCategory as Category, is_worker
         from seamless.diagnostics import record
         from seamless.error_envelope import ExecutionCanceledError
         try:
@@ -419,6 +419,21 @@ class Checksum:
                 except CacheMissError as exc:
                     category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
 
+        if is_worker():
+            try:
+                from seamless_transformer.worker import dask_available
+            except ImportError:
+                has_dask = False
+            else:
+                has_dask = dask_available()
+            if not has_dask:
+                # The parent's candidates (its reverse caches and its database)
+                # were not consulted, so this is not a cache miss.
+                raise NotImplementedError(
+                    f"Cannot fingertip {self.hex()} inside a Seamless worker "
+                    "without Dask: only the worker's own candidates were tried "
+                    f"(highest failure: {category.wire_name})"
+                )
         raise CacheMissError(self, fingertip_category=category)
 
     def fingertip_sync(self, celltype=None):
