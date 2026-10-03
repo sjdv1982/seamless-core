@@ -290,6 +290,8 @@ class Expression:
         else:
             input_checksum = self.input_checksum
         if input_checksum is None:
+            if not run_source:
+                return None
             raise ValueError("Expression input is not a concrete checksum yet")
         from .checksum.expression import _has_local_buffer, get_expression_cache
 
@@ -418,6 +420,8 @@ class Expression:
         else:
             input_checksum = self.input_checksum
         if input_checksum is None:
+            if not run_source:
+                return None
             raise ValueError("Expression input is not a concrete checksum yet")
         result = await evaluate_expression_placed(
             input_checksum,

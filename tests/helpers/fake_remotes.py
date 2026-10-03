@@ -90,6 +90,8 @@ def install_fake_remotes(
     database_remote.set_expression_result = set_expression_result
     database_remote.get_hash_type = get_hash_type
     database_remote.set_hash_type = set_hash_type
+    # The fake exposes no reverse-lookup database for fingertip recovery.
+    database_remote.has_read_database = lambda: False
     jobserver_remote.run_expression = run_expression
     jobserver_remote.has_jobserver = lambda: jobserver_available
     jobserver_remote._jobserver_clients = [object()] if jobserver_available else []

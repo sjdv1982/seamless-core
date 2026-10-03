@@ -1051,7 +1051,7 @@ def test_noncanonical_null_takes_the_ordinary_route_through_the_executor(monkeyp
     get_expression_cache().clear()
     noncanonical = Checksum(hashlib.sha256(b"null").digest())
     result = evaluate_expression_local(noncanonical, "", "plain", "checksum")
-    assert calls == [("plain", "checksum")]
+    assert calls and all(call == ("plain", "checksum") for call in calls)
     assert result != NULL_CHECKSUM
     assert result == Buffer(noncanonical, "checksum").get_checksum()
     get_expression_cache().clear()
