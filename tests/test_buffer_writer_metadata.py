@@ -22,3 +22,23 @@ def test_hash_type_and_expression_metadata_for_one_checksum_do_not_deduplicate(
 
     assert calls.count("database:set_hash_type") == 1
     assert calls.count("database:set") == 1
+
+
+def test_failed_metadata_write_does_not_block_flush_or_future_records(monkeypatch):
+    install_fake_remotes(monkeypatch, {}, {}, [], jobserver_available=False)
+    attempts = []
+    key = ("test", "failed-metadata")
+
+    async def write():
+        attempts.append(1)
+        if len(attempts) <= 4:
+            raise RuntimeError("temporary database failure")
+        return True
+
+    buffer_writer._register_metadata(key, write)
+    buffer_writer.flush(timeout=5)
+    assert len(attempts) == 4
+
+    buffer_writer._register_metadata(key, write)
+    buffer_writer.flush(timeout=5)
+    assert len(attempts) == 5

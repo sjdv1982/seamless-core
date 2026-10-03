@@ -443,7 +443,7 @@ def test_softcancel_leaves_the_member_set_and_the_peer_keeps_the_evaluation(monk
 
 
 def test_sync_local_evaluation_joins_member_set_between_threads(monkeypatch):
-    """Synchronous and asynchronous local callers share expression work."""
+    """Synchronous callers in separate threads share expression work."""
     import concurrent.futures
     import threading
 
@@ -495,6 +495,107 @@ def test_sync_local_evaluation_joins_member_set_between_threads(monkeypatch):
     assert applied == 1
     assert first_result == second_result
     assert first_result == Buffer("threaded local evaluation", "str").get_checksum()
+
+
+def test_sync_local_evaluation_inside_its_active_loop_runs_unshared(monkeypatch):
+    source = Buffer({"a": "same loop"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    original = expression_mod._evaluate_expression_async
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(expression_mod, "_evaluate_expression_async", delayed)
+
+    async def main():
+        task = asyncio.create_task(expression_mod.evaluate_expression_local_async(
+            source_checksum, "a", "plain", "str",
+        ))
+        await started.wait()
+        try:
+            direct = expression_mod.evaluate_expression_local(
+                source_checksum, "a", "plain", "str",
+            )
+        finally:
+            release.set()
+        return direct, await task
+
+    direct, shared = asyncio.run(main())
+    assert direct == shared == Buffer("same loop", "str").get_checksum()
+
+
+def test_sync_local_evaluation_joins_async_from_another_thread(monkeypatch):
+    import concurrent.futures
+    import threading
+
+    source = Buffer({"a": "cross thread"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    original = expression_mod._evaluate_expression_async
+    started, release = threading.Event(), threading.Event()
+    applied = 0
+
+    async def delayed(*args, **kwargs):
+        nonlocal applied
+        applied += 1
+        started.set()
+        await asyncio.to_thread(release.wait)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(expression_mod, "_evaluate_expression_async", delayed)
+
+    def asynchronous():
+        return asyncio.run(expression_mod.evaluate_expression_local_async(
+            source_checksum, "a", "plain", "str",
+        ))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(asynchronous)
+        assert started.wait(5)
+        threading.Timer(0.05, release.set).start()
+        joined = expression_mod.evaluate_expression_local(
+            source_checksum, "a", "plain", "str",
+        )
+        assert joined == future.result(timeout=5)
+    assert applied == 1
+
+
+def test_sync_local_evaluation_joins_dispatch(monkeypatch):
+    import concurrent.futures
+    import threading
+    from tests.helpers.fake_remotes import install_fake_remotes
+
+    source = Buffer({"a": "dispatched"}, "plain")
+    source.tempref()
+    source_checksum = source.get_checksum()
+    result_checksum = Buffer("dispatched", "str").get_checksum()
+    key = (source_checksum.hex(), "a", "plain", "str")
+    calls = []
+    started, release = threading.Event(), threading.Event()
+    install_fake_remotes(
+        monkeypatch, {}, {key: result_checksum}, calls,
+        run_expression_gate=release, run_expression_started=started,
+    )
+
+    def dispatched():
+        return asyncio.run(expression_mod.evaluate_expression_placed(
+            source_checksum, "a", "plain", "str", execution="remote",
+        ))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(dispatched)
+        assert started.wait(5)
+        threading.Timer(0.05, release.set).start()
+        joined = expression_mod.evaluate_expression_local(
+            source_checksum, "a", "plain", "str",
+        )
+        assert joined == future.result(timeout=5) == result_checksum
+    assert calls.count("jobserver:run") == 1
 
 
 def _dispatched_scratch_evaluation_setup(monkeypatch, value):

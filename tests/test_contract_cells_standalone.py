@@ -289,6 +289,16 @@ def test_wiring_refusal_message_names_both_spellings(api):
 
 # --- Projections: a Cell is a handle ----------------------------------------------------
 
+def test_subpath_checksum_converts_from_declared_input_type():
+    parent = Cell("plain")
+    parent.set({"b": 0})
+    source = Buffer("7", "text").get_checksum()
+
+    parent["b"].set_checksum(source, input_celltype="text")
+
+    assert parent.value["b"] == 7
+
+
 def test_list_membership_raises_on_a_non_identical_member_but_set_and_dict_do_not():
     """cells.md §Projections: `x in [cells]` compares by identity first, then with ==, so it raises
     ProjectionError as soon as it meets a non-identical member; hash-based membership does not."""

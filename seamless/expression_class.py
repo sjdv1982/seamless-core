@@ -202,7 +202,7 @@ class Expression:
 
     @property
     def result(self) -> Checksum | None:
-        """Return the published result and express user result interest."""
+        """Return the recorded result and express user result interest."""
 
         self._enable_result_holding()
         return self._result_checksum
@@ -213,7 +213,7 @@ class Expression:
         return self._result_checksum
 
     def _available_result(self, *, wait: bool = True) -> Checksum | None:
-        """Return a published result, or join matching expression work only."""
+        """Return a recorded result, or join matching expression work only."""
         result = self._result_checksum_internal()
         if result is not None or not wait:
             return result
@@ -243,10 +243,11 @@ class Expression:
         execution: str = "auto",
         scratch: bool = True,
         materialize: bool | None = None,
+        run_source: bool = True,
     ) -> Checksum | None:
-        """Evaluate and publish without expressing user result interest.
+        """Evaluate and record without expressing user result interest.
 
-        Dependency schedulers use this entry point.  Publication is still
+        Dependency schedulers use this entry point.  Recording is still
         centralized here, so a downstream holder can adopt the concrete
         checksum even when the Expression itself remains neutral.
 
@@ -259,34 +260,37 @@ class Expression:
             choose_expression_evaluation_location,
             evaluate_expression_local,
         )
+        from .checksum.conversion import conversion_trivial, conversion_reinterpret
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._evaluate_internal_async(
+                execution=execution, scratch=scratch, materialize=materialize,
+                run_source=run_source,
+            ))
 
         input_ref = self._input_ref
         if isinstance(input_ref, Expression):
-            # An intermediate takes the scratch of what it feeds; it is asked
-            # for its checksum only.
             input_checksum = input_ref._evaluate_internal(
-                execution=execution, scratch=scratch, materialize=not scratch
+                execution=execution, scratch=True, materialize=False,
+                run_source=run_source,
             )
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency(
-                require_value=not scratch,
-                scratch_override=False if not scratch else None)
+            preserving = conversion_trivial | conversion_reinterpret
+            override = (False if not scratch and not self.path and
+                        (self.input_celltype == self.celltype or
+                         (self.input_celltype, self.celltype) in preserving)
+                        else None)
+            if run_source:
+                input_ref._compute_dependency(
+                    require_value=False, scratch_override=override)
             input_checksum = input_ref._result_checksum_internal()
         else:
             input_checksum = self.input_checksum
         if input_checksum is None:
             raise ValueError("Expression input is not a concrete checksum yet")
-        import asyncio
-
-        if execution != "local":
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return asyncio.run(
-                    self._evaluate_internal_async(
-                        execution=execution, scratch=scratch, materialize=materialize
-                    )
-                )
         from .checksum.expression import _has_local_buffer, get_expression_cache
 
         if materialize is None:
@@ -315,6 +319,27 @@ class Expression:
             raise RunningLoopRefusal(
                 "Cannot block on remote expression evaluation in a running loop"
             )
+        from .checksum.convert import conversion_needs_buffer
+        from .checksum.expression import _has_local_buffer
+        needs_input = bool(self.path) or conversion_needs_buffer(
+            input_checksum, self.input_celltype, self.celltype,
+        )
+        if not self.path:
+            from .checksum.null import is_null
+
+            if is_null(input_checksum):
+                needs_input = False
+        if needs_input and not _has_local_buffer(input_checksum):
+            if isinstance(input_ref, Expression):
+                input_checksum = input_ref._evaluate_internal(
+                    execution="local", scratch=True, materialize=True,
+                    run_source=run_source,
+                )
+            elif (hasattr(input_ref, "_compute_dependency")
+                  and run_source and getattr(input_ref, "scratch", False)
+                  and override is None):
+                input_ref._compute_dependency(require_value=True)
+                input_checksum = input_ref._result_checksum_internal()
         result = evaluate_expression_local(
             input_checksum,
             self.path,
@@ -323,6 +348,7 @@ class Expression:
             validator=self.validator,
             validator_language=self.validator_language,
             materialize=materialize,
+            member_id=id(self),
         )
         return self._hold_result(result)
 
@@ -332,57 +358,80 @@ class Expression:
         execution: str = "auto",
         scratch: bool = True,
         materialize: bool | None = None,
+        run_source: bool = True,
     ) -> Checksum | None:
         """Async counterpart of :meth:`_evaluate_internal`."""
 
-        from .checksum.expression import (
-            evaluate_expression_local_async,
-            evaluate_expression_placed,
-        )
+        from .checksum.expression import evaluate_expression_placed
+        from .checksum.conversion import conversion_trivial, conversion_reinterpret
 
         input_ref = self._input_ref
+        materialize_input = None
         if isinstance(input_ref, Expression):
             input_checksum = await input_ref._evaluate_internal_async(
-                execution=execution, scratch=scratch, materialize=not scratch
+                execution=execution, scratch=True, materialize=False,
+                run_source=run_source,
             )
+            async def materialize_input():
+                return await input_ref._evaluate_internal_async(
+                    execution="local", scratch=True, materialize=True,
+                    run_source=run_source,
+                )
         elif hasattr(input_ref, "_compute_dependency_async"):
-            await input_ref._compute_dependency_async(
-                require_value=not scratch,
-                scratch_override=False if not scratch else None)
+            preserving = conversion_trivial | conversion_reinterpret
+            override = (False if not scratch and not self.path and
+                        (self.input_celltype == self.celltype or
+                         (self.input_celltype, self.celltype) in preserving)
+                        else None)
+            if run_source:
+                await input_ref._compute_dependency_async(
+                    require_value=False, scratch_override=override)
             input_checksum = input_ref._result_checksum_internal()
+            if run_source and getattr(input_ref, "scratch", False) and override is None:
+                async def materialize_input():
+                    await input_ref._compute_dependency_async(require_value=True)
+                    return input_ref._result_checksum_internal()
+            elif not run_source and getattr(input_ref, "scratch", False):
+                async def materialize_input():
+                    from seamless import CacheMissError
+
+                    raise CacheMissError(input_checksum)
         elif hasattr(input_ref, "_compute_dependency"):
-            input_ref._compute_dependency(
-                require_value=not scratch,
-                scratch_override=False if not scratch else None)
+            preserving = conversion_trivial | conversion_reinterpret
+            override = (False if not scratch and not self.path and
+                        (self.input_celltype == self.celltype or
+                         (self.input_celltype, self.celltype) in preserving)
+                        else None)
+            if run_source:
+                input_ref._compute_dependency(
+                    require_value=False, scratch_override=override)
             input_checksum = input_ref._result_checksum_internal()
+            if run_source and getattr(input_ref, "scratch", False) and override is None:
+                async def materialize_input():
+                    input_ref._compute_dependency(require_value=True)
+                    return input_ref._result_checksum_internal()
+            elif not run_source and getattr(input_ref, "scratch", False):
+                async def materialize_input():
+                    from seamless import CacheMissError
+
+                    raise CacheMissError(input_checksum)
         else:
             input_checksum = self.input_checksum
         if input_checksum is None:
             raise ValueError("Expression input is not a concrete checksum yet")
-        if execution == "local":
-            result = await evaluate_expression_local_async(
-                input_checksum,
-                self.path,
-                self.input_celltype,
-                self.celltype,
-                validator=self.validator,
-                validator_language=self.validator_language,
-                member_id=id(self),
-                materialize=not scratch if materialize is None else materialize,
-            )
-        else:
-            result = await evaluate_expression_placed(
-                input_checksum,
-                self.path,
-                self.input_celltype,
-                self.celltype,
-                validator=self.validator,
-                validator_language=self.validator_language,
-                execution=execution,
-                scratch=scratch,
-                materialize=materialize,
-                member_id=id(self),
-            )
+        result = await evaluate_expression_placed(
+            input_checksum,
+            self.path,
+            self.input_celltype,
+            self.celltype,
+            validator=self.validator,
+            validator_language=self.validator_language,
+            execution=execution,
+            scratch=scratch,
+            materialize=materialize,
+            materialize_input=materialize_input,
+            member_id=id(self),
+        )
         return self._hold_result(result)
 
     def _enable_result_holding(self) -> None:

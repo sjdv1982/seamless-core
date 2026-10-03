@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from seamless import Buffer, Cell, Checksum
+from seamless import Buffer, Cell, Checksum, Expression
 from seamless.checksum import expression as expression_mod
 from seamless.checksum.expression import (
     _active_expressions,
@@ -45,6 +45,40 @@ def test_hashserver_only_input_dispatches_from_getter(monkeypatch):
 
     assert _cell(source_checksum).checksum == result_checksum
     assert calls == ["database:get", "jobserver:run", "database:set"]
+
+
+@pytest.mark.parametrize("scratch", [False, True])
+def test_intermediate_is_scratch_then_materialized_here(monkeypatch, scratch):
+    source = Buffer("remote", "text")
+    source_checksum = source.get_checksum()
+    intermediate = Expression(
+        source_checksum, input_celltype="text", celltype="mixed",
+    ).compute(execution="local")
+    drop_buffer(source_checksum)
+    drop_buffer(intermediate)
+    get_expression_cache().clear()
+    first_key = (source_checksum.hex(), "", "text", "mixed")
+    calls, sent = [], []
+    buffers = {source_checksum: source.content}
+    install_fake_remotes(
+        monkeypatch, {}, {first_key: intermediate}, calls, buffers=buffers,
+    )
+    jobserver_remote = sys.modules["seamless_remote.jobserver_remote"]
+    fake_dispatch = jobserver_remote.run_expression
+
+    async def run_expression(*args, scratch=False):
+        sent.append(scratch)
+        return await fake_dispatch(*args, scratch=scratch)
+
+    monkeypatch.setattr(jobserver_remote, "run_expression", run_expression)
+    cell = Cell("text", checksum=source_checksum).as_celltype("mixed")[0]
+    cell.scratch = scratch
+
+    result = cell.compute()
+    assert result is not None, (cell.exception, sent, calls)
+    assert result == Buffer("r", "mixed").get_checksum(), (cell.exception, sent, calls)
+    assert sent == [True]
+    assert intermediate not in buffers
 
 
 @pytest.mark.parametrize("scratch", [False, True])

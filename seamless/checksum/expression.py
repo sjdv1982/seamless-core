@@ -7,12 +7,15 @@ from collections.abc import Callable
 import ast
 import asyncio
 import concurrent.futures
+import logging
 import threading
 import weakref
 from typing import Any
 
 from seamless.buffer_class import Buffer
 from seamless.checksum_class import Checksum
+
+_logger = logging.getLogger(__name__)
 
 
 class ExpressionEvaluationError(ValueError):
@@ -139,6 +142,7 @@ def evaluate_expression_local(
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
     materialize: bool = False,
+    member_id: object | None = None,
 ) -> Checksum:
     """Evaluate an expression locally and return the result checksum.
 
@@ -163,7 +167,13 @@ def evaluate_expression_local(
         _tempref_expression_result(cached)
         return cached
 
-    member = object()
+    from .convert import conversion_needs_buffer
+    if not key.path and not conversion_needs_buffer(
+        key.input_checksum, key.input_celltype, key.celltype
+    ):
+        return _evaluate_expression_local_unshared(key, cache_key)
+
+    member = object() if member_id is None else member_id
     owns_evaluation = False
     with _active_expression_lock:
         active = _active_expressions.get(cache_key) or _lingering_expressions.pop(
@@ -184,11 +194,7 @@ def evaluate_expression_local(
             running_loop = None
         if active.task is not None and active.task.get_loop() is running_loop:
             softcancel_expression(cache_key, member)
-            from seamless.error_envelope import RunningLoopRefusal
-
-            raise RunningLoopRefusal(
-                "Cannot block on a local Expression evaluation in its running event loop"
-            )
+            return _evaluate_expression_local_unshared(key, cache_key)
         try:
             result = active.result_future.result()
         finally:
@@ -443,6 +449,7 @@ async def evaluate_expression_placed(
     member_id: object | None = None,
     scratch: bool = True,
     materialize: bool | None = None,
+    materialize_input=None,
 ) -> Checksum:
     """Evaluate an expression with remote cache lookup and optional jobserver dispatch.
 
@@ -483,7 +490,7 @@ async def evaluate_expression_placed(
             key.celltype,
         )
         if result is not None:
-            _expression_cache[cache_key] = result
+            _insert_expression_result(cache_key, result)
             if not materialize or await _result_reachable(result):
                 _tempref_expression_result(result)
                 return result
@@ -501,18 +508,25 @@ async def evaluate_expression_placed(
     needs_input = bool(key.path) or conversion_needs_buffer(
         key.input_checksum, key.input_celltype, key.celltype
     )
-    if (
-        known is not None
-        and needs_input
-        and not await _result_reachable(key.input_checksum)
-    ):
-        # Materializing a known result whose input is reachable nowhere: there
-        # is nothing to evaluate from. Recovering it is fingertip's job.
-        from seamless import CacheMissError
+    if not key.path:
+        from .null import is_null
 
-        raise CacheMissError(known)
-
-    location = execution
+        if is_null(key.input_checksum):
+            needs_input = False
+    input_materialized_here = False
+    if (needs_input and materialize_input is not None
+            and not await _result_reachable(key.input_checksum)):
+        local_input = Checksum(await materialize_input())
+        if local_input != key.input_checksum:
+            return await evaluate_expression_placed(
+                local_input, key.path, key.input_celltype, key.celltype,
+                execution="local", member_id=member_id, scratch=scratch,
+                materialize=materialize,
+            )
+        input_materialized_here = True
+    # A scratch value request cannot dispatch: the executing side would hold
+    # its buffer privately, leaving this requester unable to use it.
+    location = "local" if input_materialized_here or (scratch and materialize) else execution
     if location == "auto":
         location = choose_expression_evaluation_location(
             key.input_checksum, key.path, key.input_celltype, key.celltype
@@ -538,6 +552,11 @@ async def evaluate_expression_placed(
                 if not jobserver_remote.has_jobserver() and not _has_daskserver():
                     location = "local"
     if location == "local":
+        if (needs_input and not input_materialized_here
+                and not await _result_reachable(key.input_checksum)):
+            from seamless import CacheMissError
+
+            raise CacheMissError(key.input_checksum)
         result = await evaluate_expression_local_async(
             key.input_checksum,
             key.path,
@@ -562,14 +581,14 @@ async def evaluate_expression_placed(
             # Joined a scratch dispatch that was already underway: its result
             # was not written. Ask once more, non-scratch, without joining.
             result = await _dispatch_remote_expression(key, scratch=False)
-            _expression_cache[cache_key] = result
+            _record_expression_result(key, cache_key, result)
             _tempref_expression_result(result)
         return result
     else:
         raise ValueError(f"Unknown expression execution location: {location!r}")
 
     result = Checksum(result)
-    _expression_cache[cache_key] = result
+    _insert_expression_result(cache_key, result)
     _tempref_expression_result(result)
     return result
 
@@ -647,16 +666,8 @@ async def _execute_remote_expression(
     try:
         active.dispatched_scratch = bool(active.scratch)
         result = await _dispatch_remote_expression(key, scratch=active.scratch)
-        _expression_cache[cache_key] = result
+        _record_expression_result(key, cache_key, result)
         _tempref_expression_result(result)
-        if database_remote is not None:
-            await database_remote.set_expression_result(
-                key.input_checksum,
-                key.path,
-                key.input_celltype,
-                key.celltype,
-                result,
-            )
     except asyncio.CancelledError as exc:
         active.canceled = True
         if not active.result_future.done():
@@ -851,14 +862,32 @@ def _evaluate_expression_after_validation(
     return result_checksum
 
 
+def _insert_expression_result(
+    cache_key: tuple[str, str, str, str], result: Checksum
+) -> bool:
+    """Insert a forward mapping once; return whether it was new."""
+    result = Checksum(result)
+    recorded = _expression_cache.get(cache_key)
+    if recorded is None:
+        _expression_cache[cache_key] = result
+        return True
+    if recorded != result:
+        _logger.error(
+            "Expression %r produced %s, but %s is already recorded",
+            cache_key, result, recorded,
+        )
+    return False
+
+
 def _record_expression_result(
     key: ExpressionKey,
     cache_key: tuple[str, str, str, str],
     result: Checksum,
 ) -> None:
-    """Record a locally produced result in process and database caches."""
+    """Queue a new result for recording without overwriting a known mapping."""
     result = Checksum(result)
-    _expression_cache[cache_key] = result
+    if not _insert_expression_result(cache_key, result):
+        return
     from seamless.caching import buffer_writer
 
     buffer_writer.register_expression_result(
