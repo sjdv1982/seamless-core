@@ -4,10 +4,11 @@ A value request (``Expression.run()``) is answered only by a result checksum who
 buffer the requester can reach. A checksum request, even from a non-scratch owner,
 accepts any recorded checksum. A cached checksum without a
 reachable buffer is evaluated again: locally, or by a non-scratch dispatch that the
-executing side materializes and writes. With the input reachable nowhere, the answer
-is ``CacheMissError`` on the result; recovering it is ``fingertip()``'s job.
+executing side materializes and writes. Without a scratch ban, dispatch may
+proceed when only the executing side can reach the input.
 """
 
+import asyncio
 import gc
 
 import pytest
@@ -100,19 +101,22 @@ def test_reachable_cached_result_is_an_answer_for_run(monkeypatch):
     assert sent == []
 
 
-def test_input_reachable_nowhere_raises_on_the_result(monkeypatch):
+def test_unreachable_input_dispatches_without_a_scratch_ban(monkeypatch):
     source_checksum = Checksum("3" * 64)
     result_checksum = Checksum("4" * 64)
     key = (source_checksum.hex(), "a", "plain", "str")
     calls = []
-    install_fake_remotes(monkeypatch, {key: result_checksum}, {}, calls)
+    install_fake_remotes(
+        monkeypatch, {key: result_checksum}, {key: result_checksum}, calls,
+    )
     sent = _record_scratch(monkeypatch)
 
-    expression = Expression(source_checksum, path="a", input_celltype="plain", celltype="str")
-    with pytest.raises(CacheMissError) as info:
-        expression.run()
-    assert info.value.args == (result_checksum,)
-    assert sent == []
+    result = asyncio.run(expression_mod.evaluate_expression_placed(
+        source_checksum, "a", "plain", "str", scratch=False,
+        materialize=True,
+    ))
+    assert result == result_checksum
+    assert sent == [False]
 
 
 def test_cell_carries_its_scratch_policy_on_dispatch(monkeypatch):

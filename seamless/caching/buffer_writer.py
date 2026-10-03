@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 import threading
 import time
 import traceback
@@ -25,6 +26,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Optional, TYPE_CHECKING
 
 from seamless import ensure_open
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from seamless.buffer_class import Buffer
@@ -165,7 +168,10 @@ def flush(timeout: Optional[float] = None) -> None:
     with _lock:
         metadata = [entry for entry in _entries.values() if entry.metadata_key is not None]
     for entry in metadata:
-        entry.future.result(timeout=timeout)
+        try:
+            entry.future.result(timeout=timeout)
+        except Exception:
+            _logger.exception("Queued metadata write failed for %r", entry.metadata_key)
 
     buffers = {
         entry.checksum: entry.buffer
@@ -192,6 +198,7 @@ def flush(timeout: Optional[float] = None) -> None:
         clients.append(c)
 
     if not clients0:
+        _stop_worker()
         return
 
     start = time.time()
@@ -383,19 +390,31 @@ async def _worker_loop(queue: asyncio.Queue[_QueueEntry]) -> None:
 
 
 async def _process_entry(entry: _QueueEntry) -> None:
-    try:
-        if entry.metadata_key is not None:
-            result = await entry.metadata_write()
-        else:
-            try:
-                import seamless_remote.buffer_remote as buffer_remote
-            except ImportError:
-                result = False
+    result, error = None, None
+    attempts = 4 if entry.metadata_key is not None else 1
+    for attempt in range(attempts):
+        try:
+            if entry.metadata_key is not None:
+                result = await entry.metadata_write()
             else:
-                result = await buffer_remote.write_buffer(entry.checksum, entry.buffer)
-        error = None
-    except Exception as exc:
-        result, error = None, exc
+                try:
+                    import seamless_remote.buffer_remote as buffer_remote
+                except ImportError:
+                    result = False
+                else:
+                    result = await buffer_remote.write_buffer(entry.checksum, entry.buffer)
+            error = None
+            break
+        except Exception as exc:
+            error = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.05 * (2 ** attempt))
+    if entry.metadata_key is not None:
+        if error is not None:
+            _logger.error("Queued metadata write failed for %r", entry.metadata_key,
+                          exc_info=(type(error), error, error.__traceback__))
+        elif result is False and entry.metadata_key[0] == "expression":
+            _logger.error("Queued metadata write was refused for %r", entry.metadata_key)
 
     future = entry.future
     if not future.done():
@@ -403,10 +422,11 @@ async def _process_entry(entry: _QueueEntry) -> None:
             future.set_result(result)
         else:
             future.set_exception(error)
-    if error is None:
+    if error is None or entry.metadata_key is not None:
         with _lock:
             key = entry.checksum if entry.metadata_key is None else entry.metadata_key
-            _entries.pop(key, None)
+            if _entries.get(key) is entry:
+                _entries.pop(key, None)
 
 
 # --- queue submission helpers -------------------------------------------------

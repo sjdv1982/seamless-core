@@ -306,144 +306,120 @@ class Checksum:
         get_buffer_cache().mark_scratch(self)
 
     async def fingertip(self, celltype=None):
-        """Return a resolvable buffer/value, recomputing locally if needed."""
+        """Resolve locally, or report the highest failure encountered in recovery."""
+        from seamless import FingertipCategory as Category
         from seamless.diagnostics import record
-        record("fingertip", self, celltype)
+        from seamless.error_envelope import ExecutionCanceledError
+        try:
+            from aiohttp import ClientError
+        except ImportError:
+            infrastructure_errors = (TimeoutError,)
+        else:
+            infrastructure_errors = (ClientError, TimeoutError)
 
+        record("fingertip", self, celltype)
+        category = Category.MATERIALIZATION
+        propagate = (ExecutionCanceledError,) + infrastructure_errors
         try:
             return await self.resolution(celltype)
         except CacheMissError:
             pass
 
-        candidates: list[str] = []
-        seen: set[str] = set()
         try:
-            from seamless_transformer.transformation_cache import (
-                get_transformation_cache,
-            )
-
+            from seamless_transformer.transformation_cache import get_transformation_cache
+        except ImportError:
+            cache = None
+        else:
             cache = get_transformation_cache()
-            for tf_checksum in cache.get_reverse_transformations(self):
-                tf_hex = Checksum(tf_checksum).hex()
-                if tf_hex not in seen:
-                    seen.add(tf_hex)
-                    candidates.append(tf_hex)
-        except Exception:
-            pass
-
         try:
             from seamless_remote import database_remote
+        except ImportError:
+            database_remote = None
+        from seamless.checksum.expression import (
+            get_expression_cache, _insert_expression_result,
+            evaluate_expression_local_async,
+        )
 
-            tf_checksums = await database_remote.get_rev_transformations(self)
-        except Exception:
-            tf_checksums = None
-        if tf_checksums:
-            for tf_checksum in tf_checksums:
-                tf_hex = Checksum(tf_checksum).hex()
+        candidates = [] if cache is None else [
+            Checksum(t).hex() for t in cache.get_reverse_transformations(self)
+        ]
+        seen = set(candidates)
+        expression_candidates = [
+            key for key, result in list(get_expression_cache().items())
+            if Checksum(result) == self
+        ]
+        seen_expressions = set(expression_candidates)
+        if database_remote is not None and database_remote.has_read_database():
+            for tf in await database_remote.get_rev_transformations(self) or []:
+                tf_hex = Checksum(tf).hex()
+                if cache is not None:
+                    cache._register_transformation_result(Checksum(tf), self)
                 if tf_hex not in seen:
                     seen.add(tf_hex)
                     candidates.append(tf_hex)
-
-        expression_candidates: list[dict] = []
-        seen_expressions: set[tuple[str, str, str, str]] = set()
-        try:
-            from seamless.checksum.expression import get_expression_cache
-
-            for key, result_checksum in get_expression_cache().items():
-                if Checksum(result_checksum) != self:
-                    continue
-                input_hex, path, source_celltype, celltype = key
-                seen_expressions.add(key)
-                expression_candidates.append(
-                    {
-                        "checksum": input_hex,
-                        "path": path,
-                        "input_celltype": source_celltype,
-                        "celltype": celltype,
-                    }
+            for expr in await database_remote.get_rev_expressions(self) or []:
+                key = (
+                    Checksum(expr["checksum"]).hex(), expr["path"],
+                    expr["input_celltype"], expr["celltype"],
                 )
-        except Exception:
-            pass
+                _insert_expression_result(key, self)
+                if key not in seen_expressions:
+                    seen_expressions.add(key)
+                    expression_candidates.append(key)
 
-        try:
-            from seamless_remote import database_remote
-
-            rev_expressions = await database_remote.get_rev_expressions(self)
-        except Exception:
-            rev_expressions = None
-        if rev_expressions:
-            for expression in rev_expressions:
-                try:
-                    expr_key = (
-                        Checksum(expression["checksum"]).hex(),
-                        expression["path"],
-                        expression["input_celltype"],
-                        expression["celltype"],
-                    )
-                except Exception:
-                    continue
-                if expr_key in seen_expressions:
-                    continue
-                seen_expressions.add(expr_key)
-                expression_candidates.append(expression)
-
-        for expression in expression_candidates:
+        for input_hex, path, source_celltype, target_celltype in expression_candidates:
+            input_checksum = Checksum(input_hex)
             try:
-                from seamless.checksum.expression import (
-                    evaluate_expression_local_async,
-                )
-
-                input_checksum = Checksum(expression["checksum"])
-                path = expression["path"]
-                source_celltype = expression["input_celltype"]
-                celltype = expression["celltype"]
-                try:
-                    await input_checksum.fingertip()
-                except CacheMissError:
-                    pass
+                await input_checksum.fingertip()
+            except CacheMissError as exc:
+                category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
+                continue
+            try:
                 result = await evaluate_expression_local_async(
-                    input_checksum,
-                    path,
-                    source_celltype,
-                    celltype,
+                    input_checksum, path, source_celltype, target_celltype,
                     materialize=True,
                 )
-                if Checksum(result) != self:
-                    continue
-                return await self.resolution(celltype)
+            except propagate:
+                raise
             except Exception:
+                category = Category.IRREPRODUCIBLE_EXPRESSION
                 continue
+            if Checksum(result) != self:
+                category = Category.IRREPRODUCIBLE_EXPRESSION
+                continue
+            try:
+                return await self.resolution(celltype)
+            except CacheMissError as exc:
+                category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
 
-        if not candidates:
-            raise CacheMissError(self)
-
-        try:
+        if candidates and cache is not None:
             from seamless_transformer.transformation_cache import (
                 recompute_from_transformation_checksum,
             )
-        except Exception as exc:
-            raise CacheMissError(self) from exc
-
-        for tf_hex in candidates:
-            try:
-                result = await recompute_from_transformation_checksum(
-                    tf_hex, scratch=True, require_value=True
-                )
-            except Exception:
-                continue
-            if result is None:
-                continue
-            try:
-                if Checksum(result) != self:
+            for tf_hex in candidates:
+                try:
+                    result = await recompute_from_transformation_checksum(
+                        tf_hex, scratch=True, require_value=True
+                    )
+                except propagate:
+                    raise
+                except CacheMissError as exc:
+                    category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
                     continue
-            except Exception:
-                continue
-            try:
-                return await self.resolution(celltype)
-            except CacheMissError:
-                continue
+                except Exception:
+                    category = max(category, Category.FAILED_TRANSFORMATION)
+                    continue
+                if result is None:
+                    continue
+                if Checksum(result) != self:
+                    category = max(category, Category.IRREPRODUCIBLE_TRANSFORMATION)
+                    continue
+                try:
+                    return await self.resolution(celltype)
+                except CacheMissError as exc:
+                    category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
 
-        raise CacheMissError(self)
+        raise CacheMissError(self, fingertip_category=category)
 
     def fingertip_sync(self, celltype=None):
         """Synchronously resolve or recompute the checksum buffer/value."""

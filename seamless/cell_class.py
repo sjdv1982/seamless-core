@@ -443,7 +443,16 @@ class CellBase:
 
     def fingertip(self):
         if self._workflow_backend is not None:
-            checksum = self._workflow_backend.checksum
+            backend = self._workflow_backend
+            if backend._is_handle():
+                lease = backend._handle_parent()
+                try:
+                    backend._handle_sync(lease)
+                    checksum = backend._handle_result
+                finally:
+                    lease._release_refholds()
+            else:
+                checksum = backend.checksum
         else:
             self._sync_recipe()
             if self._standalone_exception is not None or self._miswired():
@@ -970,7 +979,11 @@ class Cell(CellBase):
             )
         from .checksum_class import Checksum
         checksum = Checksum(checksum)
-        value = checksum.resolve(input_celltype or self.celltype)
+        if input_celltype is not None and input_celltype != self.celltype:
+            checksum = Expression(
+                checksum, input_celltype=input_celltype, celltype=self.celltype,
+            ).compute()
+        value = checksum.resolve(self.celltype)
         if target.celltype in ("deepcell", "deepfolder", "folder"):
             value = checksum
         self._standalone_commit(target, path, value)
@@ -1125,28 +1138,10 @@ def _available_input_checksum(value, *, scratch=True, execution="auto",
     if isinstance(value, Checksum):
         return value
     if isinstance(value, Expression):
-        if isinstance(value._input_ref, Checksum):
-            return value._evaluate_internal(
-                execution=execution, scratch=scratch, materialize=materialize
-            )
-        checksum = _available_input_checksum(
-            value._input_ref, scratch=scratch, execution=execution,
-            materialize=materialize)
-        if checksum is None:
-            return None
-        # Freeze the resolved input before evaluating this projection; a value
-        # request may already have started its upstream Transformation.
-        concrete = Expression(
-            checksum, path=value.path, input_celltype=value.input_celltype,
-            celltype=value.celltype, validator=value.validator,
-            validator_language=value.validator_language,
+        return value._evaluate_internal(
+            execution=execution, scratch=scratch, materialize=materialize,
+            run_source=materialize,
         )
-        try:
-            result = concrete._evaluate_internal(
-                scratch=scratch, execution=execution, materialize=materialize)
-        finally:
-            concrete._release_refholds()
-        return value._hold_result(result) if result is not None else None
     if isinstance(value, Cell):
         if materialize and value._workflow_backend is None:
             # A direct, unconverted Cell already has the requested checksum.
@@ -1205,26 +1200,53 @@ def _checksum_for_buffer(value, celltype):
 
 
 def _check_projected_source(source, celltype):
-    if isinstance(source, (Cell, Expression)) and source.path and source.celltype != celltype:
-        path = source.path
-        if path.startswith("[") and path.endswith("]"):
-            item = path[1:-1]
-            projection = (
-                f'  …{path}.as_celltype("{celltype}") '
-                f"# item {item} of the {source.celltype} (a character), as {celltype}"
-            )
-            conversion = (
-                f'  ….as_celltype("{celltype}"){path} '
-                f"# item {item} of the parsed list"
-            )
-            raise TypeError(
-                f"would convert {source.celltype} -> {celltype} behind a projection.\n"
-                f"{projection}\n{conversion}"
-            )
-        raise TypeError(
-            "Cannot implicitly convert behind a projection; use as_celltype() "
-            "before or after projecting"
-        )
+    if not (isinstance(source, (Cell, Expression)) and source.path
+            and source.celltype != celltype):
+        return
+    import json
+    from .checksum.expression import parse_path, validate_expression_shape
+
+    parts = parse_path(source.path)
+    spelled_parts = []
+    for kind, item in parts:
+        if kind == "slice":
+            start = "" if item.start is None else repr(item.start)
+            stop = "" if item.stop is None else repr(item.stop)
+            step = "" if item.step is None else ":" + repr(item.step)
+            spelled_parts.append(f"[{start}:{stop}{step}]")
+        elif isinstance(item, str):
+            spelled_parts.append(f"[{json.dumps(item)}]")
+        else:
+            spelled_parts.append(f"[{item!r}]")
+    spelled = "".join(spelled_parts)
+    item = spelled_parts[-1][1:-1]
+    source_type = source.celltype
+    input_type = source.input_celltype
+    character_types = {"text", "str", "python", "ipython", "cson", "yaml", "checksum"}
+    nature = " (a member)" if input_type in {"deepcell", "deepfolder", "folder"} else (
+        " (a character)" if input_type in character_types else ""
+    )
+    spellings = [(
+        f'…{spelled}.as_celltype("{celltype}")',
+        f"# item {item} of the {input_type}{nature}, as {celltype}",
+    )]
+    try:
+        validate_expression_shape("", input_type, celltype)
+    except (TypeError, ValueError):
+        pass
+    else:
+        parsed = (
+            "the parsed mapping" if isinstance(parts[-1][1], str)
+            else "the parsed list"
+        ) if input_type in character_types else f"the {celltype}"
+        spellings.append((
+            f'….as_celltype("{celltype}"){spelled}',
+            f"# item {item} of {parsed}",
+        ))
+    width = max(len(code) for code, _ in spellings)
+    lines = [f"would convert {source_type} -> {celltype} behind a projection."]
+    lines.extend(f"  {code.ljust(width)}   {gloss}" for code, gloss in spellings)
+    raise TypeError("\n".join(lines))
 
 
 def _cell_recipe_key(cell):

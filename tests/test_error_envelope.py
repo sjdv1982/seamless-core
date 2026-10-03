@@ -54,3 +54,19 @@ def test_unknown_kind_and_failure_identity():
     assert copy.deepcopy(error).failure_id == error.failure_id
     assert copy.deepcopy(error).kind == error.kind
     assert execution_error(error) is error
+
+
+@pytest.mark.parametrize("category", list(__import__("seamless").FingertipCategory))
+def test_fingertip_category_envelope_pickle_and_execution_error(category):
+    import pickle
+    error = CacheMissError(Checksum("b" * 64), fingertip_category=category)
+    assert encode_error(error)["error"]["fingertip_category"] == category.wire_name
+    for restored in (decode_error(encode_error(error)), pickle.loads(pickle.dumps(error)), execution_error(error)):
+        assert restored.args[0] == error.args[0]
+        assert restored.fingertip_category == category
+
+
+@pytest.mark.parametrize("category", ["unknown", None, 3, []])
+def test_unknown_fingertip_category_is_malformed(category):
+    with pytest.raises(ValueError):
+        decode_error({"error": {"kind": "cache_miss", "message": "", "fingertip_category": category}})

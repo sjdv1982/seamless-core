@@ -44,3 +44,56 @@ def test_fingertip_recovers_chained_expression_results_recursively():
     assert value == "leaf"
     assert first_checksum.resolve("plain") == {"b": "leaf"}
     assert second_checksum.resolve("str") == "leaf"
+
+
+def test_expression_mismatch_reports_category_without_recording(monkeypatch, caplog):
+    import pytest
+    from seamless import CacheMissError, FingertipCategory
+    from seamless.caching import buffer_writer
+    expression_mod.get_expression_cache().clear()
+    source = Buffer({"a": "actual"}, "plain")
+    source.tempref()
+    key = (source.get_checksum().hex(), "a", "plain", "str")
+    wanted = Checksum("e" * 64)
+    expression_mod.get_expression_cache()[key] = wanted
+    writes = []
+    monkeypatch.setattr(buffer_writer, "register_expression_result", lambda *args: writes.append(args))
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(wanted.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_EXPRESSION
+    assert expression_mod.get_expression_cache()[key] == wanted
+    assert writes == []
+    assert "already recorded" in caplog.text
+
+
+def test_recorded_expression_that_raises_is_irreproducible():
+    import pytest
+    from seamless import CacheMissError, FingertipCategory
+    expression_mod.get_expression_cache().clear()
+    source = Buffer({"a": "actual"}, "plain")
+    source.tempref()
+    key = (source.get_checksum().hex(), "missing", "plain", "str")
+    wanted = Checksum("f" * 64)
+    expression_mod.get_expression_cache()[key] = wanted
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(wanted.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_EXPRESSION
+    assert expression_mod.get_expression_cache()[key] == wanted
+
+
+def test_expression_input_retains_nested_failure_category(monkeypatch):
+    import pytest
+    from seamless import CacheMissError, FingertipCategory
+    expression_mod.get_expression_cache().clear()
+    source, wanted = Checksum("c" * 64), Checksum("b" * 64)
+    key = (source.hex(), "a", "plain", "str")
+    expression_mod.get_expression_cache()[key] = wanted
+    original = Checksum.fingertip
+    async def fingertip(checksum, *args, **kwargs):
+        if checksum == source:
+            raise CacheMissError(source, fingertip_category=FingertipCategory.IRREPRODUCIBLE_TRANSFORMATION)
+        return await original(checksum, *args, **kwargs)
+    monkeypatch.setattr(Checksum, "fingertip", fingertip)
+    with pytest.raises(CacheMissError) as caught:
+        asyncio.run(wanted.fingertip())
+    assert caught.value.fingertip_category == FingertipCategory.IRREPRODUCIBLE_TRANSFORMATION
