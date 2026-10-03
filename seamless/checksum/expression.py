@@ -563,11 +563,6 @@ async def evaluate_expression_placed(
             from seamless import CacheMissError
 
             raise CacheMissError(known)
-        if (needs_input and not input_materialized_here
-                and not await _result_reachable(key.input_checksum)):
-            from seamless import CacheMissError
-
-            raise CacheMissError(key.input_checksum)
         result = await evaluate_expression_local_async(
             key.input_checksum,
             key.path,
