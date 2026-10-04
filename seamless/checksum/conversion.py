@@ -17,9 +17,11 @@ interpretation. The binary/bytes boundary and text/JSON boundary have the
 explicit reformat rules in ``conversion_reformat``.
 
 ``text -> plain`` first tries :mod:`orjson` and otherwise stores the text as a
-plain string. Integer and float parsing has a 1000-byte input limit. Null and
-boolean canonical buffers are checksum-based virtual values, so relevant rules
-can succeed or fail without fetching their buffer.
+plain string. Either way the result is the canonical ``plain`` serialization,
+so ``plain -> text -> plain`` canonicalizes non-canonical JSON. Integer and
+float parsing has a 1000-byte input limit. Null and boolean canonical buffers
+are checksum-based virtual values, so relevant rules can succeed or fail
+without fetching their buffer.
 """
 
 from .celltypes import celltypes

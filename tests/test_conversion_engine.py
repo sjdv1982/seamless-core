@@ -101,7 +101,8 @@ def test_no_fetch_keep_conversion_rules_preserve_checksum(
 @pytest.mark.parametrize(
     "source,target,buffer,expected",
     [
-        ("text", "plain", lambda: Buffer(b'{"a":1}'), lambda buffer: {"a": 1}),
+        # text -> plain keeps only an already-canonical plain buffer.
+        ("text", "plain", lambda: Buffer({"a": 1}, "plain"), lambda buffer: {"a": 1}),
         (
             "plain",
             "text",
@@ -149,6 +150,7 @@ def test_bytes_npy_to_binary_preserves_checksum_after_fetching_input_once():
     [
         ("plain", "text", lambda: Buffer("hi", "plain"), lambda: Buffer("hi\n", "text")),
         ("text", "plain", lambda: Buffer(b"hi"), lambda: Buffer("hi", "plain")),
+        ("text", "plain", lambda: Buffer(b'{"a":1}'), lambda: Buffer({"a": 1}, "plain")),
         ("bytes", "binary", lambda: Buffer(b"\xff"), lambda: Buffer(np.array(b"\xff"), "binary")),
         ("int", "bool", lambda: Buffer(1, "int"), lambda: Buffer(True, "bool")),
         ("yaml", "plain", lambda: Buffer("a: 1\n", "yaml"), lambda: Buffer({"a": 1}, "plain")),

@@ -398,16 +398,22 @@ def _text_to_plain(
 ) -> tuple[Checksum, Buffer | None]:
     from .virtual import NOT_VIRTUAL, virtual_value
 
-    # Canonical null/booleans are valid JSON plain values by checksum alone.
-    if virtual_value(checksum, "plain") is not NOT_VIRTUAL:
-        return checksum, None
+    # Null/boolean checksums determine their plain value without a buffer.
+    value = virtual_value(checksum, "plain")
+    if value is NOT_VIRTUAL:
+        text = _value_of(checksum, "text", get_buffer)
+        try:
+            value = orjson.loads(text)
+        except orjson.JSONDecodeError:
+            # Not JSON: the text itself becomes a JSON string.
+            value = text
 
-    text = _value_of(checksum, "text", get_buffer)
-    try:
-        orjson.loads(text)
-    except orjson.JSONDecodeError:
-        return _buffer_result(Buffer(text, "plain"))
-    return checksum, None
+    # The result is always the canonical plain serialization of the value;
+    # only a source that is already canonical keeps its checksum.
+    result = Buffer(value, "plain")
+    if result.get_checksum() == checksum:
+        return checksum, None
+    return _buffer_result(result)
 
 
 def _convert_possible(
