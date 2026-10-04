@@ -538,7 +538,7 @@ field-absent `?` `BufferInfo` did, because `UTF8`/`JSON`/`NUMPY` are always know
 | `binary→bytes` | `¬NUMPY_BYTES` | `≠` (`value.tobytes()`) |
 | `mixed→bytes` | `¬NUMPY ∨ (NUMPY ∧ ¬NUMPY_BYTES)` | `≠` |
 | `plain→text` | `Kind ∉ {JSON_STRING}` (object/array/number, and bool/null constants) | `≠` (strip quotes) |
-| `text→plain` | `JSON` | `≠` (wrap text as JSON string) |
+| `text→plain` | never from the word: only a source that is already the canonical `plain` buffer (the null/boolean checksums are decided by checksum) | `≠` (canonical re-dump of JSON; other text wrapped as a JSON string) |
 | `text→str` | — | always `≠` (add quotes) |
 | `str→text` | — | always `≠` (remove quotes) |
 | `yaml→plain` | — | always `≠` (re-dump as canonical JSON) |

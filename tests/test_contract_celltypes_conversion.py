@@ -662,10 +662,96 @@ def test_equivalence_evaluates_the_mapped_pair():
 
 
 @pytest.mark.parametrize("raw", [NULL_BUFFER, b"null", b"true", b"false\n"])
-@pytest.mark.parametrize("source,target", [("bytes", "mixed"), ("text", "plain")])
-def test_null_and_boolean_checksums_keep_without_fetch(raw, source, target):
+def test_null_and_boolean_checksums_keep_without_fetch(raw):
     checksum = Buffer(raw).get_checksum()
-    assert convert_checksum(checksum, source, target, _fail_if_fetched) == (checksum, None)
+    assert convert_checksum(checksum, "bytes", "mixed", _fail_if_fetched) == (checksum, None)
+
+
+@pytest.mark.parametrize("raw", [NULL_BUFFER, b"true\n", b"false\n"])
+def test_text_to_plain_keeps_canonical_null_and_boolean_without_fetch(raw):
+    checksum = Buffer(raw).get_checksum()
+    assert convert_checksum(checksum, "text", "plain", _fail_if_fetched) == (checksum, None)
+    assert conversion_needs_buffer(checksum, "text", "plain") is False
+
+
+@pytest.mark.parametrize("raw", [b"null", b"true", b"false"])
+def test_text_to_plain_canonicalizes_null_and_boolean_without_fetch(raw):
+    """§Reformat rules, text->plain: a non-canonical null/boolean checksum
+    becomes the canonical one, decided from the checksum alone."""
+    checksum = Buffer(raw).get_checksum()
+    result_checksum, result_buffer = convert_checksum(
+        checksum, "text", "plain", _fail_if_fetched
+    )
+    assert result_buffer is not None
+    assert result_buffer.content == raw + b"\n"
+    assert result_checksum == Buffer(raw + b"\n").get_checksum()
+    assert conversion_needs_buffer(checksum, "text", "plain") is False
+
+
+@pytest.mark.parametrize(
+    "raw,value",
+    [
+        (b'{"b":1,"a":[1,2]}', {"a": [1, 2], "b": 1}),
+        (b'{"a": 1}\n', {"a": 1}),
+        (b"[1,2]\n", [1, 2]),
+        (b" 4.50 ", 4.5),
+        (b"1e3", 1000.0),
+        (b'"\\u0061bc"', "abc"),
+        (b'{"a":1,"a":2}', {"a": 2}),
+    ],
+)
+def test_text_to_plain_canonicalizes_json(raw, value):
+    """§Reformat rules, text->plain: JSON text becomes the canonical plain
+    buffer of its value, and the conversion is idempotent."""
+    buffer = Buffer(raw)
+    canonical = Buffer(value, "plain")
+    result_checksum, result_buffer = convert_checksum(
+        buffer.get_checksum(), "text", "plain", lambda: buffer
+    )
+    assert result_buffer is not None
+    assert result_buffer.content == canonical.content
+    assert result_checksum == canonical.get_checksum()
+    assert convert_checksum(result_checksum, "text", "plain", lambda: result_buffer) == (
+        result_checksum,
+        None,
+    )
+
+
+@pytest.mark.parametrize("value", [{"a": [1, 2], "b": None}, [], 4.5, 3, "abc", True])
+def test_text_to_plain_keeps_a_canonical_plain_buffer(value):
+    buffer = Buffer(value, "plain")
+    checksum = buffer.get_checksum()
+    assert convert_checksum(checksum, "text", "plain", lambda: buffer) == (checksum, None)
+
+
+@pytest.mark.parametrize(
+    "raw,value",
+    [
+        (b'{"b":1,"a":[1,2]}', {"a": [1, 2], "b": 1}),
+        (b"[1,2]", [1, 2]),
+        (b" 4.50", 4.5),
+        (b"null", None),
+        (b"true", True),
+        (b'"\\u0061bc"', "abc"),
+        # A string value is unwrapped by plain->text, and the text is then read
+        # as JSON again: a string whose content is itself JSON changes value.
+        (b'"5"', 5),
+    ],
+)
+def test_plain_text_plain_round_trip_canonicalizes(raw, value):
+    """§Canonicalizing a `plain` checksum: plain->text->plain."""
+    buffer = Buffer(raw)
+    text_checksum, text_buffer = convert_checksum(
+        buffer.get_checksum(), "plain", "text", lambda: buffer
+    )
+    if text_buffer is None:
+        text_buffer = buffer
+    result_checksum, result_buffer = convert_checksum(
+        text_checksum, "text", "plain", lambda: text_buffer
+    )
+    assert result_checksum == Buffer(value, "plain").get_checksum()
+    if result_buffer is not None:
+        assert result_buffer.content == Buffer(value, "plain").content
 
 
 def test_bytes_to_mixed_utf8_strips_trailing_newlines():
