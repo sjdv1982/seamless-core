@@ -558,6 +558,10 @@ async def evaluate_expression_placed(
                 location = "local"
             else:
                 if not jobserver_remote.has_jobserver() and not _has_daskserver():
+                    if needs_input and not await _result_reachable(key.input_checksum):
+                        from seamless import CacheMissError
+
+                        raise CacheMissError(key.input_checksum)
                     location = "local"
     if location == "local":
         if (
