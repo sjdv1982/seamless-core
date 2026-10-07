@@ -393,7 +393,15 @@ async def _evaluate_expression_async(
         needs_buffer = conversion_needs_buffer(
             key.input_checksum, key.input_celltype, key.celltype
         )
-    input_buffer = await key.input_checksum.resolution() if needs_buffer else None
+    if needs_buffer:
+        from seamless import CacheMissError
+
+        try:
+            input_buffer = _get_local_buffer(key.input_checksum)
+        except CacheMissError:
+            input_buffer = await key.input_checksum.resolution()
+    else:
+        input_buffer = None
 
     def get_buffer() -> Buffer:
         if input_buffer is None:
