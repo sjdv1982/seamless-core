@@ -102,6 +102,8 @@ def register_expression_result(key, result):
     except ImportError:
         return
     input_hex, path, input_celltype, celltype = key
+    if hasattr(database_remote, 'has_write_server') and not database_remote.has_write_server():
+        return
     metadata_key = ("expression", input_hex, path, input_celltype, celltype)
     _register_metadata(
         metadata_key,

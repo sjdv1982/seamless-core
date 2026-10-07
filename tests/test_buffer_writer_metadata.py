@@ -42,3 +42,19 @@ def test_failed_metadata_write_does_not_block_flush_or_future_records(monkeypatc
     buffer_writer._register_metadata(key, write)
     buffer_writer.flush(timeout=5)
     assert len(attempts) == 5
+
+
+def test_expression_metadata_without_write_server_is_not_refused(monkeypatch, caplog):
+    from seamless_remote import database_remote
+
+    buffer_writer.flush()
+    monkeypatch.setattr(database_remote, 'has_write_server', lambda: False)
+
+    async def unexpected_write(*args):
+        raise AssertionError('no database is configured')
+
+    monkeypatch.setattr(database_remote, 'set_expression_result', unexpected_write)
+    checksum = Buffer(b'no database').get_checksum()
+    buffer_writer.register_expression_result((checksum.hex(), '', 'text', 'plain'), checksum)
+    buffer_writer.flush(timeout=5)
+    assert 'Queued metadata write' not in caplog.text
