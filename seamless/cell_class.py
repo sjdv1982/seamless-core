@@ -665,6 +665,18 @@ class Cell(CellBase):
     def mount(self):
         self.mount.unmount()
 
+    @property
+    def share(self):
+        """Expose a share handle for a whole Context cell."""
+        if self._workflow_backend is None:
+            raise AttributeError("share is only available for bound workflow cells")
+        from seamless_workflow.attachments.share.api import ShareHandle
+        return ShareHandle(self._workflow_backend)
+
+    @share.deleter
+    def share(self):
+        self.share.unshare()
+
 
 
 
@@ -827,6 +839,13 @@ class Cell(CellBase):
                 backend = None
             if backend is None:
                 raise AttributeError("mount is only available for bound workflow cells")
+        if name == "share":
+            try:
+                backend = object.__getattribute__(self, "_workflow_backend")
+            except AttributeError:
+                backend = None
+            if backend is None:
+                raise AttributeError("share is only available for bound workflow cells")
         # A class-defined API member is authoritative even when its getter raises
         # a deliberate bound-only AttributeError.  Only genuinely unknown names
         # participate in structural projection.
