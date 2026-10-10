@@ -113,6 +113,24 @@ def register_expression_result(key, result):
     )
 
 
+def register_celljoin_result(celljoin_hex, celltype, result):
+    """Queue a celljoin-result metadata write on the existing worker."""
+    ensure_open("CellJoin writer register")
+    try:
+        from seamless_remote import database_remote
+    except ImportError:
+        return
+    if hasattr(database_remote, "has_write_server") and not database_remote.has_write_server():
+        return
+    metadata_key = ("celljoin", celljoin_hex, celltype)
+    _register_metadata(
+        metadata_key,
+        lambda: database_remote.set_celljoin_result(
+            celljoin_hex, celltype, result
+        ),
+    )
+
+
 def _register_metadata(metadata_key, metadata_write):
     with _lock:
         if metadata_key in _entries:
@@ -415,7 +433,7 @@ async def _process_entry(entry: _QueueEntry) -> None:
         if error is not None:
             _logger.error("Queued metadata write failed for %r", entry.metadata_key,
                           exc_info=(type(error), error, error.__traceback__))
-        elif result is False and entry.metadata_key[0] == "expression":
+        elif result is False and entry.metadata_key[0] in {"expression", "celljoin"}:
             _logger.error("Queued metadata write was refused for %r", entry.metadata_key)
 
     future = entry.future

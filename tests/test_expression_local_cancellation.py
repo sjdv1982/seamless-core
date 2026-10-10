@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from seamless import Buffer, Checksum, Expression
+from seamless import Buffer, CacheMissError, Checksum, Expression
 from seamless.checksum import expression as expression_mod
 
 
@@ -20,6 +20,16 @@ def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monke
     monkeypatch.setattr(expression_mod, "_active_expressions", {})
     source = Buffer({"a": "local cancellation witness"}, "plain")
     source_checksum = source.get_checksum()
+    original_get_local_buffer = expression_mod._get_local_buffer
+
+    def require_source_fetch(checksum):
+        # Keep the source available to resolution, while forcing this request
+        # through the delayed fetch rather than its local-buffer fast path.
+        if checksum == source_checksum:
+            raise CacheMissError(checksum)
+        return original_get_local_buffer(checksum)
+
+    monkeypatch.setattr(expression_mod, "_get_local_buffer", require_source_fetch)
     expression = Expression(
         source_checksum, "a", input_celltype="plain", celltype="str"
     )
