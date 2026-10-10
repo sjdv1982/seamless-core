@@ -35,12 +35,12 @@ class ExpressionKey:
             canonicalize_checksum(self.input_checksum, self.input_celltype))
 
 
-_expression_cache: dict[tuple[str, str, str, str], Checksum] = {}
+_expression_cache: dict[tuple, Checksum] = {}
 _expression_result_buffers: weakref.WeakValueDictionary[Checksum, Buffer] = (
     weakref.WeakValueDictionary()
 )
 _active_expression_lock = threading.RLock()
-_active_expressions: dict[tuple[str, str, str, str], "_ActiveExpression"] = {}
+_active_expressions: dict[tuple, "_ActiveExpression"] = {}
 
 
 @dataclass
@@ -53,30 +53,38 @@ class _ActiveExpression:
     linger: asyncio.TimerHandle | None = None
     scratch: bool = True
     dispatched_scratch: bool | None = None
-    input_claim: Checksum | None = None
+    input_claims: tuple[Checksum, ...] = ()
 
     def hold_input(self, checksum):
+        self.hold_inputs((checksum,))
+
+    def hold_inputs(self, checksums):
         from seamless.reference_lifecycle import register_refholder
 
-        checksum.incref_refholder(scratch=None)
-        self.input_claim = checksum
+        unique = {}
+        for checksum in checksums:
+            checksum = Checksum(checksum)
+            unique.setdefault(checksum.hex(), checksum)
+        claims = tuple(unique.values())
+        for checksum in claims:
+            checksum.incref_refholder(scratch=None)
+        self.input_claims = claims
         register_refholder(self)
 
     def _refheld_checksums(self):
-        return (
-            ()
-            if self.input_claim is None
-            else ((self.input_claim, "expression materialization"),)
+        return tuple(
+            (checksum, "expression materialization")
+            for checksum in self.input_claims
         )
 
     def _release_refholds(self):
-        checksum = self.input_claim
-        self.input_claim = None
-        if checksum is not None:
+        claims = self.input_claims
+        self.input_claims = ()
+        for checksum in claims:
             checksum.decref_refholder()
 
 
-def get_expression_cache() -> dict[tuple[str, str, str, str], Checksum]:
+def get_expression_cache() -> dict[tuple, Checksum]:
     return _expression_cache
 
 
@@ -91,6 +99,11 @@ def wait_for_active_expression(
 ):
     """Return an already-running expression's result, without starting one."""
     cache_key = (Checksum(input_checksum).hex(), path, input_celltype, celltype)
+    return wait_for_active_key(cache_key)
+
+
+def wait_for_active_key(cache_key):
+    """Return a running evaluation's result for any shared cache key."""
     with _active_expression_lock:
         active = _active_expressions.get(cache_key) or _lingering_expressions.get(
             cache_key
@@ -540,17 +553,9 @@ async def evaluate_expression_placed(
             key.input_checksum, key.path, key.input_celltype, key.celltype
         )
         if location == "remote":
-            try:
-                from seamless_remote import buffer_remote
-            except ImportError:
-                pass
-            else:
-                for client in getattr(buffer_remote, "_read_folders_clients", ()):
-                    buffer = await client.get_file_buffer(key.input_checksum)
-                    if buffer is not None:
-                        _tempref_expression_result(key.input_checksum, buffer=buffer)
-                        location = "local"
-                        break
+            buffer = await _local_input_buffer_async(key.input_checksum)
+            if buffer is not None:
+                location = "local"
         if location == "remote":
             try:
                 from seamless_remote import jobserver_remote
@@ -881,7 +886,7 @@ def _evaluate_expression_after_validation(
 
 
 def _insert_expression_result(
-    cache_key: tuple[str, str, str, str], result: Checksum
+    cache_key: tuple, result: Checksum
 ) -> bool:
     """Insert a forward mapping once; return whether it was new."""
     result = Checksum(result)
@@ -1128,6 +1133,28 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     from seamless import CacheMissError
 
     raise CacheMissError(checksum)
+
+
+async def _local_input_buffer_async(checksum: Checksum) -> Buffer | None:
+    """Find an input buffer in process memory or a configured read folder."""
+    checksum = Checksum(checksum)
+    from seamless import CacheMissError
+
+    try:
+        return _get_local_buffer(checksum)
+    except CacheMissError:
+        pass
+
+    try:
+        from seamless_remote import buffer_remote
+    except ImportError:
+        return None
+    for client in getattr(buffer_remote, "_read_folders_clients", ()):
+        buffer = await client.get_file_buffer(checksum)
+        if buffer is not None:
+            _tempref_expression_result(checksum, buffer=buffer)
+            return buffer
+    return None
 
 
 def _has_local_buffer(checksum: Checksum) -> bool:

@@ -91,8 +91,11 @@ class Expression:
 
     def __post_init__(self) -> None:
         from .cell_class import Cell, _typed_input_celltype, _check_input_ref
+        from .celljoin_class import CellJoin
 
         ref = self._input_ref
+        if isinstance(ref, CellJoin):
+            raise TypeError("A CellJoin cannot be used as an Expression input")
         _check_input_ref(ref)
         typed = _typed_input_celltype(ref)
         if (

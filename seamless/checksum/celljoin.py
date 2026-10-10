@@ -234,3 +234,156 @@ def evaluate_celljoin(
         for key, checksum in spec.members:
             value[key] = _resolve_value(checksum, spec.celltype, get_buffer)
     return Buffer(value, spec.celltype)
+
+
+_CELLJOIN_FETCH_CONCURRENCY = 32
+
+
+async def _gather_celljoin_buffers(required, preloaded=None):
+    """Collect the required input buffers, using provided buffers first."""
+    import asyncio
+
+    from .expression import _local_input_buffer_async
+
+    preloaded = {} if preloaded is None else preloaded
+    semaphore = asyncio.Semaphore(_CELLJOIN_FETCH_CONCURRENCY)
+
+    async def get_one(checksum):
+        if checksum in preloaded:
+            return checksum, preloaded[checksum]
+        async with semaphore:
+            buffer = await _local_input_buffer_async(checksum)
+            if buffer is None:
+                buffer = await checksum.resolution()
+        return checksum, buffer
+
+    tasks = [asyncio.create_task(get_one(checksum)) for checksum in required]
+    try:
+        pairs = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    return dict(pairs)
+
+
+def _record_celljoin_result(
+    spec: CellJoinSpec, result: Checksum, buffer: Buffer
+) -> bool:
+    """Keep every produced buffer, and report whether its mapping was new."""
+    from .expression import (
+        _expression_result_buffers,
+        _insert_expression_result,
+        _tempref_expression_result,
+    )
+
+    cache_key = celljoin_cache_key(spec.checksum, spec.celltype)
+    inserted = _insert_expression_result(cache_key, result)
+    _expression_result_buffers[Checksum(result)] = buffer
+    _tempref_expression_result(result, buffer=buffer, produced=True)
+    return inserted
+
+
+async def _evaluate_celljoin_with_buffers(spec: CellJoinSpec, buffers):
+    import asyncio
+
+    buffer = await asyncio.to_thread(evaluate_celljoin, spec, buffers.__getitem__)
+    result = buffer.get_checksum()
+    _record_celljoin_result(spec, result, buffer)
+    return result
+
+
+async def evaluate_celljoin_local_async(
+    spec: CellJoinSpec,
+    *,
+    member_id=None,
+    materialize=False,
+    buffers=None,
+) -> Checksum:
+    """Evaluate one celljoin locally, sharing active work by its identity."""
+    import asyncio
+    import concurrent.futures
+
+    from .expression import (
+        _active_expression_lock,
+        _active_expressions,
+        _discard_active_expression,
+        _expression_cache,
+        _has_local_buffer,
+        _join_expression,
+        _lingering_expressions,
+        _tempref_expression_result,
+        _ActiveExpression,
+        softcancel_expression,
+    )
+
+    key = celljoin_cache_key(spec.checksum, spec.celltype)
+    cached = _expression_cache.get(key)
+    if cached is not None and (not materialize or _has_local_buffer(cached)):
+        _tempref_expression_result(cached)
+        return cached
+
+    required = required_buffers(spec)
+    if not required:
+        gathered = await _gather_celljoin_buffers(required, buffers)
+        return await _evaluate_celljoin_with_buffers(spec, gathered)
+
+    member = object() if member_id is None else member_id
+    with _active_expression_lock:
+        active = _active_expressions.get(key) or _lingering_expressions.pop(key, None)
+        if active is None or active.result_future.done():
+            active = _ActiveExpression(concurrent.futures.Future(), None, set())
+            active.hold_inputs(required)
+            _active_expressions[key] = active
+
+            async def execute():
+                try:
+                    gathered = await _gather_celljoin_buffers(required, buffers)
+                    result = await _evaluate_celljoin_with_buffers(spec, gathered)
+                except BaseException as exc:
+                    if not active.result_future.done():
+                        active.result_future.set_exception(exc)
+                else:
+                    if not active.result_future.done():
+                        active.result_future.set_result(result)
+                finally:
+                    with _active_expression_lock:
+                        if _active_expressions.get(key) is active:
+                            _active_expressions.pop(key, None)
+
+            active.task = asyncio.create_task(execute())
+            active.task.add_done_callback(
+                lambda task: _discard_active_expression(key, active)
+            )
+        _active_expressions[key] = active
+        waiter = _join_expression(active, member)
+
+    try:
+        result = await asyncio.shield(waiter)
+    finally:
+        softcancel_expression(key, member)
+
+    if materialize and not _has_local_buffer(result):
+        gathered = await _gather_celljoin_buffers(required, buffers)
+        return await _evaluate_celljoin_with_buffers(spec, gathered)
+    return result
+
+
+async def evaluate_celljoin_placed(
+    spec: CellJoinSpec,
+    *,
+    execution="auto",
+    member_id=None,
+    scratch=True,
+) -> Checksum:
+    """Resolve a recorded result or evaluate the celljoin locally."""
+    from .expression import _expression_cache, _tempref_expression_result
+
+    key = celljoin_cache_key(spec.checksum, spec.celltype)
+    result = _expression_cache.get(key)
+    if result is not None:
+        _tempref_expression_result(result)
+        return result
+    return await evaluate_celljoin_local_async(spec, member_id=member_id)

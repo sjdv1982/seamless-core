@@ -516,6 +516,10 @@ class Cell(CellBase):
         if checksum is not _UNSET and source is not _UNSET:
             raise TypeError("checksum and source are mutually exclusive inputs")
         if source is not _UNSET:
+            from .celljoin_class import CellJoin
+
+            if isinstance(source, CellJoin):
+                raise TypeError("A CellJoin cannot be used as a Cell input")
             _validate_workflow_source(source)
             if source is not None and (isinstance(source, Checksum) or not _is_input_ref(source)):
                 raise TypeError("source must be a typed reference; use checksum= for a checksum")
@@ -1093,6 +1097,10 @@ def _is_input_ref(value: Any) -> bool:
 
 
 def _check_input_ref(value: Any) -> Any:
+    from .celljoin_class import CellJoin
+
+    if isinstance(value, CellJoin):
+        raise TypeError("A CellJoin cannot be used as a Cell input")
     if _is_input_ref(value):
         return value
     hint = "use .set() to give a Cell a value"

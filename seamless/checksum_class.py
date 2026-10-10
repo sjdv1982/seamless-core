@@ -346,7 +346,7 @@ class Checksum:
         seen = set(candidates)
         expression_candidates = [
             key for key, result in list(get_expression_cache().items())
-            if Checksum(result) == self
+            if isinstance(key, tuple) and len(key) == 4 and Checksum(result) == self
         ]
         seen_expressions = set(expression_candidates)
         if database_remote is not None and database_remote.has_read_database():
