@@ -11,6 +11,7 @@ from .checksum.celljoin import (
     celljoin_buffer,
     celljoin_cache_key,
     parse_celljoin,
+    publish_celljoin_definition,
     required_buffers,
 )
 from .checksum_class import Checksum
@@ -30,6 +31,7 @@ class CellJoin(Expression):
         definition = build_celljoin(root, members)
         buffer = celljoin_buffer(definition)
         spec = parse_celljoin(buffer, celltype)
+        publish_celljoin_definition(spec)
         return cls(
             spec.checksum,
             path="",

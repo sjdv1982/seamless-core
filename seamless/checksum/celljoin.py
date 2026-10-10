@@ -88,6 +88,21 @@ def celljoin_buffer(celljoin: dict[str, str | None]) -> Buffer:
     return Buffer(celljoin, "plain")
 
 
+def definition_store_available() -> bool:
+    """Return whether both the hashserver and database can accept writes."""
+    try:
+        from seamless_remote import buffer_remote, database_remote
+    except ImportError:
+        return False
+    return buffer_remote.has_write_server() and database_remote.has_write_server()
+
+
+def publish_celljoin_definition(spec: CellJoinSpec) -> None:
+    """Queue the canonical celljoin definition on the hashserver."""
+    if definition_store_available():
+        spec.buffer.transfer_write()
+
+
 def _load_definition(
     definition: Buffer | bytes | str | Mapping,
 ) -> tuple[dict, Buffer | None]:
@@ -283,6 +298,12 @@ def _record_celljoin_result(
     inserted = _insert_expression_result(cache_key, result)
     _expression_result_buffers[Checksum(result)] = buffer
     _tempref_expression_result(result, buffer=buffer, produced=True)
+    if inserted:
+        from seamless.caching import buffer_writer
+
+        buffer_writer.register_celljoin_result(
+            spec.checksum.hex(), spec.celltype, result
+        )
     return inserted
 
 
@@ -386,4 +407,19 @@ async def evaluate_celljoin_placed(
     if result is not None:
         _tempref_expression_result(result)
         return result
+    try:
+        from seamless_remote import database_remote
+    except ImportError:
+        database_remote = None
+    if database_remote is not None:
+        result = await database_remote.get_celljoin_result(
+            spec.checksum, spec.celltype
+        )
+        if result is not None:
+            from .expression import _insert_expression_result
+
+            _insert_expression_result(key, result)
+            result = _expression_cache.get(key, Checksum(result))
+            _tempref_expression_result(result)
+            return result
     return await evaluate_celljoin_local_async(spec, member_id=member_id)
