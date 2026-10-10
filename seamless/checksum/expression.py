@@ -616,14 +616,16 @@ async def evaluate_expression_placed(
     return result
 
 
-async def _run_active_remote_expression(
-    key: ExpressionKey,
-    cache_key: tuple[str, str, str, str],
+async def _run_active_remote(
+    cache_key,
     *,
-    database_remote,
-    member_id: object | None,
-    scratch: bool,
-) -> Checksum:
+    claims,
+    dispatch,
+    record,
+    member_id,
+    scratch,
+):
+    """Share one remote evaluation and its held inputs for a cache key."""
     member = object() if member_id is None else member_id
     with _active_expression_lock:
         active = _active_expressions.get(cache_key) or _lingering_expressions.pop(
@@ -638,9 +640,9 @@ async def _run_active_remote_expression(
                 task=None,
                 members=set(),
             )
-            active.hold_input(key.input_checksum)
+            active.hold_inputs(claims)
             active.task = asyncio.create_task(
-                _execute_remote_expression(key, cache_key, active, database_remote)
+                _execute_active_remote(cache_key, active, dispatch, record)
             )
             _active_expressions[cache_key] = active
             active.task.add_done_callback(
@@ -653,6 +655,33 @@ async def _run_active_remote_expression(
         return await asyncio.shield(waiter), active
     finally:
         softcancel_expression(cache_key, member)
+
+
+async def _run_active_remote_expression(
+    key: ExpressionKey,
+    cache_key: tuple[str, str, str, str],
+    *,
+    database_remote,
+    member_id: object | None,
+    scratch: bool,
+) -> Checksum:
+    async def dispatch(active):
+        return await _dispatch_remote_expression(
+            key, scratch=bool(active.scratch)
+        )
+
+    def record(result):
+        _record_expression_result(key, cache_key, result)
+        _tempref_expression_result(result)
+
+    return await _run_active_remote(
+        cache_key,
+        claims=(key.input_checksum,),
+        dispatch=dispatch,
+        record=record,
+        member_id=member_id,
+        scratch=scratch,
+    )
 
 
 async def _dispatch_remote_expression(key: ExpressionKey, *, scratch: bool) -> Checksum:
@@ -680,17 +709,12 @@ async def _dispatch_remote_expression(key: ExpressionKey, *, scratch: bool) -> C
     return Checksum(result)
 
 
-async def _execute_remote_expression(
-    key: ExpressionKey,
-    cache_key: tuple[str, str, str, str],
-    active: _ActiveExpression,
-    database_remote,
-) -> None:
+async def _execute_active_remote(cache_key, active, dispatch, record) -> None:
+    """Run a keyed remote dispatch and publish its shared result to waiters."""
     try:
         active.dispatched_scratch = bool(active.scratch)
-        result = await _dispatch_remote_expression(key, scratch=active.scratch)
-        _record_expression_result(key, cache_key, result)
-        _tempref_expression_result(result)
+        result = Checksum(await dispatch(active))
+        record(result)
     except asyncio.CancelledError as exc:
         active.canceled = True
         if not active.result_future.done():
@@ -703,9 +727,28 @@ async def _execute_remote_expression(
         if not active.result_future.done():
             active.result_future.set_result(result)
     finally:
-        with _active_expression_lock:
-            if _active_expressions.get(cache_key) is active:
-                _active_expressions.pop(cache_key, None)
+        # A last member may have moved this request into the linger map.
+        # Clean both registries and release claims even if loop shutdown races
+        # the Task done callback.
+        _discard_active_expression(cache_key, active)
+
+
+async def _execute_remote_expression(
+    key: ExpressionKey,
+    cache_key: tuple[str, str, str, str],
+    active: _ActiveExpression,
+    database_remote,
+) -> None:
+    async def dispatch(active):
+        return await _dispatch_remote_expression(
+            key, scratch=bool(active.scratch)
+        )
+
+    def record(result):
+        _record_expression_result(key, cache_key, result)
+        _tempref_expression_result(result)
+
+    await _execute_active_remote(cache_key, active, dispatch, record)
 
 
 def _join_expression(active, member):

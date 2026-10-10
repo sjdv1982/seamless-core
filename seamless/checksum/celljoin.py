@@ -285,9 +285,9 @@ async def _gather_celljoin_buffers(required, preloaded=None):
 
 
 def _record_celljoin_result(
-    spec: CellJoinSpec, result: Checksum, buffer: Buffer
+    spec: CellJoinSpec, result: Checksum, buffer: Buffer | None = None
 ) -> bool:
-    """Keep every produced buffer, and report whether its mapping was new."""
+    """Record a produced or remotely evaluated celljoin result."""
     from .expression import (
         _expression_result_buffers,
         _insert_expression_result,
@@ -296,8 +296,11 @@ def _record_celljoin_result(
 
     cache_key = celljoin_cache_key(spec.checksum, spec.celltype)
     inserted = _insert_expression_result(cache_key, result)
-    _expression_result_buffers[Checksum(result)] = buffer
-    _tempref_expression_result(result, buffer=buffer, produced=True)
+    if buffer is not None:
+        _expression_result_buffers[Checksum(result)] = buffer
+    _tempref_expression_result(
+        result, buffer=buffer, produced=buffer is not None
+    )
     if inserted:
         from seamless.caching import buffer_writer
 
@@ -392,6 +395,43 @@ async def evaluate_celljoin_local_async(
     return result
 
 
+async def _dispatch_remote_celljoin(
+    spec: CellJoinSpec, *, active
+) -> Checksum:
+    """Publish the definition, then dispatch only the celljoin identity."""
+    from .expression import ExpressionEvaluationError
+
+    written = await spec.buffer.write()
+    if not written:
+        raise ExpressionEvaluationError("Could not write the celljoin definition")
+
+    # Other members may have joined while the definition write was pending.
+    # Read scratch only after that await so the strongest active request reaches
+    # the remote worker.
+    active.dispatched_scratch = bool(active.scratch)
+    scratch = active.dispatched_scratch
+
+    try:
+        from seamless_remote import jobserver_remote
+    except ImportError:
+        jobserver_remote = None
+    if jobserver_remote is not None and jobserver_remote.has_jobserver():
+        return await jobserver_remote.run_celljoin(
+            spec.checksum, spec.celltype, scratch=scratch
+        )
+
+    try:
+        from seamless_remote import daskserver_remote
+    except ImportError:
+        daskserver_remote = None
+    if daskserver_remote is not None and daskserver_remote.has_daskserver():
+        return await daskserver_remote.run_celljoin(
+            spec.checksum, spec.celltype, scratch=scratch
+        )
+
+    raise RuntimeError("No remote execution backend is available for celljoin")
+
+
 async def evaluate_celljoin_placed(
     spec: CellJoinSpec,
     *,
@@ -462,7 +502,9 @@ async def evaluate_celljoin_placed(
             from seamless import CacheMissError
 
             raise CacheMissError(missing[0])
-        raise NotImplementedError("Remote celljoin dispatch is not implemented yet")
+        return await _dispatch_celljoin_remotely(
+            spec, key, required, member_id=member_id, scratch=scratch
+        )
 
     local_missing = []
     for checksum in required:
@@ -484,7 +526,9 @@ async def evaluate_celljoin_placed(
         backend_available = jobserver_remote.has_jobserver() or _has_daskserver()
 
     if all(present) and backend_available and definition_store_available():
-        raise NotImplementedError("Remote celljoin dispatch is not implemented yet")
+        return await _dispatch_celljoin_remotely(
+            spec, key, required, member_id=member_id, scratch=scratch
+        )
 
     remote_missing = [
         checksum
@@ -496,3 +540,25 @@ async def evaluate_celljoin_placed(
 
         raise CacheMissError(remote_missing[0])
     return await evaluate_celljoin_local_async(spec, member_id=member_id)
+
+
+async def _dispatch_celljoin_remotely(
+    spec, cache_key, required, *, member_id, scratch
+):
+    from .expression import _run_active_remote
+
+    async def dispatch(active):
+        return await _dispatch_remote_celljoin(spec, active=active)
+
+    def record(result):
+        _record_celljoin_result(spec, result)
+
+    result, _active = await _run_active_remote(
+        cache_key,
+        claims=required + (spec.checksum,),
+        dispatch=dispatch,
+        record=record,
+        member_id=member_id,
+        scratch=scratch,
+    )
+    return result
