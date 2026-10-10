@@ -399,8 +399,13 @@ async def evaluate_celljoin_placed(
     member_id=None,
     scratch=True,
 ) -> Checksum:
-    """Resolve a recorded result or evaluate the celljoin locally."""
-    from .expression import _expression_cache, _tempref_expression_result
+    """Resolve a recorded result or evaluate the celljoin according to placement."""
+    from .expression import (
+        _expression_cache,
+        _local_input_buffer_async,
+        _tempref_expression_result,
+        _has_daskserver,
+    )
 
     key = celljoin_cache_key(spec.checksum, spec.celltype)
     result = _expression_cache.get(key)
@@ -422,4 +427,72 @@ async def evaluate_celljoin_placed(
             result = _expression_cache.get(key, Checksum(result))
             _tempref_expression_result(result)
             return result
+
+    if execution not in ("auto", "local", "remote"):
+        raise ValueError(f"Unknown celljoin execution location: {execution!r}")
+
+    if spec.celltype in _DEEP_CELLTYPES:
+        return await evaluate_celljoin_local_async(spec, member_id=member_id)
+
+    required = required_buffers(spec)
+    if execution == "local":
+        return await evaluate_celljoin_local_async(spec, member_id=member_id)
+
+    try:
+        from seamless_remote import buffer_remote
+    except ImportError:
+        buffer_remote = None
+
+    if execution == "remote":
+        if not definition_store_available():
+            raise RuntimeError(
+                "Remote celljoin evaluation requires a hashserver and a database"
+            )
+        present = (
+            await buffer_remote.has_buffers(required)
+            if buffer_remote is not None
+            else [False] * len(required)
+        )
+        missing = [
+            checksum
+            for checksum, is_present in zip(required, present)
+            if not is_present
+        ]
+        if missing:
+            from seamless import CacheMissError
+
+            raise CacheMissError(missing[0])
+        raise NotImplementedError("Remote celljoin dispatch is not implemented yet")
+
+    local_missing = []
+    for checksum in required:
+        if await _local_input_buffer_async(checksum) is None:
+            local_missing.append(checksum)
+    if not local_missing:
+        return await evaluate_celljoin_local_async(spec, member_id=member_id)
+
+    present = (
+        await buffer_remote.has_buffers(required)
+        if buffer_remote is not None
+        else [False] * len(required)
+    )
+    try:
+        from seamless_remote import jobserver_remote
+    except ImportError:
+        backend_available = False
+    else:
+        backend_available = jobserver_remote.has_jobserver() or _has_daskserver()
+
+    if all(present) and backend_available and definition_store_available():
+        raise NotImplementedError("Remote celljoin dispatch is not implemented yet")
+
+    remote_missing = [
+        checksum
+        for checksum, is_present in zip(required, present)
+        if checksum in local_missing and not is_present
+    ]
+    if remote_missing:
+        from seamless import CacheMissError
+
+        raise CacheMissError(remote_missing[0])
     return await evaluate_celljoin_local_async(spec, member_id=member_id)
