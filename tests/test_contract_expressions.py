@@ -341,12 +341,13 @@ def test_expression_cancel_is_retired():
     assert "no hard cancel" in message
 
 
-def test_module_softcancel_without_member_id_is_a_noop_returning_false():
+def test_module_softcancel_without_member_id_is_a_noop_returning_false(monkeypatch):
     """expressions.md, Cancellation > API: softcancel_expression(key, None) is a
     no-op returning False, even while an evaluation of that key is in flight."""
     source = Buffer({"a": "noop witness"}, "plain")
     source.tempref()
     source_checksum = source.get_checksum()
+    _require_source_resolution(monkeypatch, source_checksum)
     key = (source_checksum.hex(), "a", "plain", "str")
     expression = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
     original_resolution = Checksum.resolution
@@ -374,6 +375,19 @@ def test_module_softcancel_without_member_id_is_a_noop_returning_false():
             return await asyncio.wait_for(task, 5)
 
     assert asyncio.run(main()) == Buffer("noop witness", "str").get_checksum()
+
+
+def _require_source_resolution(monkeypatch, source_checksum):
+    """Keep bytes resolvable, but route this source through the async gate."""
+    original_get_local_buffer = expression_mod._get_local_buffer
+
+    def require_fetch(checksum):
+        if checksum == source_checksum:
+            raise CacheMissError(checksum)
+        return original_get_local_buffer(checksum)
+
+    monkeypatch.setattr(expression_mod, "_get_local_buffer", require_fetch)
+    return original_get_local_buffer
 
 
 def _gated_local_resolution(source_checksum):
@@ -405,6 +419,7 @@ def test_softcancel_leaves_the_member_set_and_the_peer_keeps_the_evaluation(monk
     source = Buffer({"a": "peer survives softcancel"}, "plain")
     source.tempref()
     source_checksum = source.get_checksum()
+    _require_source_resolution(monkeypatch, source_checksum)
     first = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
     second = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
     original_apply_step = expression_mod._apply_step
@@ -679,6 +694,7 @@ def test_cancelling_a_callers_task_softcancels_only_that_membership(monkeypatch)
     source = Buffer({"a": "task cancel is soft"}, "plain")
     source.tempref()
     source_checksum = source.get_checksum()
+    _require_source_resolution(monkeypatch, source_checksum)
     first = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
     second = Expression(source_checksum, "a", input_celltype="plain", celltype="str")
 
@@ -909,6 +925,7 @@ def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
     source = Buffer({"present": 1}, "plain")
     source.tempref()
     source_checksum = source.get_checksum()
+    original_get_local_buffer = _require_source_resolution(monkeypatch, source_checksum)
     original_resolution = Checksum.resolution
     original_apply_step = expression_mod._apply_step
     applied = 0
@@ -944,6 +961,7 @@ def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
         return results
 
     results = asyncio.run(main())
+    monkeypatch.setattr(expression_mod, "_get_local_buffer", original_get_local_buffer)
     assert all(isinstance(r, ExpressionEvaluationError) for r in results), results
     assert applied == 1
     assert not _active_expressions

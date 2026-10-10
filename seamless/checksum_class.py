@@ -339,6 +339,13 @@ class Checksum:
             get_expression_cache, _insert_expression_result,
             evaluate_expression_local_async,
         )
+        from seamless.checksum.celljoin import (
+            _CELLJOIN_FETCH_CONCURRENCY,
+            celljoin_cache_key,
+            evaluate_celljoin_local_async,
+            parse_celljoin,
+            required_buffers,
+        )
 
         candidates = [] if cache is None else [
             Checksum(t).hex() for t in cache.get_reverse_transformations(self)
@@ -349,6 +356,12 @@ class Checksum:
             if isinstance(key, tuple) and len(key) == 4 and Checksum(result) == self
         ]
         seen_expressions = set(expression_candidates)
+        celljoin_candidates = [
+            key for key, result in list(get_expression_cache().items())
+            if (isinstance(key, tuple) and len(key) == 3
+                and key[0] == "celljoin" and Checksum(result) == self)
+        ]
+        seen_celljoins = set(celljoin_candidates)
         if database_remote is not None and database_remote.has_read_database():
             for tf in await database_remote.get_rev_transformations(self) or []:
                 tf_hex = Checksum(tf).hex()
@@ -366,6 +379,14 @@ class Checksum:
                 if key not in seen_expressions:
                     seen_expressions.add(key)
                     expression_candidates.append(key)
+            for celljoin in await database_remote.get_rev_celljoins(self) or []:
+                key = celljoin_cache_key(
+                    celljoin["checksum"], celljoin["celltype"]
+                )
+                _insert_expression_result(key, self)
+                if key not in seen_celljoins:
+                    seen_celljoins.add(key)
+                    celljoin_candidates.append(key)
 
         for input_hex, path, source_celltype, target_celltype in expression_candidates:
             input_checksum = Checksum(input_hex)
@@ -386,6 +407,67 @@ class Checksum:
                 continue
             if Checksum(result) != self:
                 category = Category.IRREPRODUCIBLE_EXPRESSION
+                continue
+            try:
+                return await self.resolution(celltype)
+            except CacheMissError as exc:
+                category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
+
+        for _, celljoin_hex, celljoin_celltype in celljoin_candidates:
+            try:
+                definition = await Checksum(celljoin_hex).resolution()
+            except CacheMissError:
+                continue
+            try:
+                spec = parse_celljoin(definition, celljoin_celltype)
+            except Exception:
+                continue
+            if spec.checksum.hex() != celljoin_hex:
+                continue
+
+            required = required_buffers(spec)
+            semaphore = asyncio.Semaphore(_CELLJOIN_FETCH_CONCURRENCY)
+
+            async def fingertip_input(input_checksum):
+                async with semaphore:
+                    return await input_checksum.fingertip()
+
+            recovered_or_errors = await asyncio.gather(
+                *(fingertip_input(input_checksum) for input_checksum in required),
+                return_exceptions=True,
+            )
+            recovered = {}
+            input_failed = False
+            for input_checksum, buffer_or_error in zip(required, recovered_or_errors):
+                if isinstance(buffer_or_error, BaseException):
+                    if isinstance(buffer_or_error, (asyncio.CancelledError,) + propagate):
+                        raise buffer_or_error
+                    if isinstance(buffer_or_error, CacheMissError):
+                        category = max(
+                            category,
+                            buffer_or_error.fingertip_category or Category.MATERIALIZATION,
+                        )
+                        input_failed = True
+                        continue
+                    raise buffer_or_error
+                recovered[input_checksum] = buffer_or_error
+            if input_failed:
+                continue
+
+            try:
+                result = await evaluate_celljoin_local_async(
+                    spec, materialize=True, buffers=recovered,
+                )
+            except propagate:
+                raise
+            except CacheMissError as exc:
+                category = max(category, exc.fingertip_category or Category.MATERIALIZATION)
+                continue
+            except Exception:
+                category = max(category, Category.IRREPRODUCIBLE_EXPRESSION)
+                continue
+            if Checksum(result) != self:
+                category = max(category, Category.IRREPRODUCIBLE_EXPRESSION)
                 continue
             try:
                 return await self.resolution(celltype)
