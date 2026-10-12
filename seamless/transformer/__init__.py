@@ -11,8 +11,13 @@ try:
         "TransformationList",
         "spawn",
         "has_spawned",
-        "global_lock",
     ]
 
 except ImportError:
     __all__ = []
+
+
+def __getattr__(name):
+    import seamless_transformer
+
+    return getattr(seamless_transformer, name)

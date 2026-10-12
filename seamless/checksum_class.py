@@ -1,6 +1,7 @@
 """Class for Seamless checksums. Seamless checksums are calculated as SHA-256 hashes of buffers."""
 
 import asyncio
+import contextvars
 import threading
 from typing import Union
 
@@ -40,7 +41,12 @@ def _run_coro_in_worker_thread(coro):
         except BaseException as exc:
             error["exc"] = exc
 
-    thread = threading.Thread(target=_runner, name="ChecksumResolveLoop")
+    context = contextvars.copy_context()
+    thread = threading.Thread(
+        target=context.run,
+        args=(_runner,),
+        name="ChecksumResolveLoop",
+    )
     thread.start()
     thread.join()
     if error:
