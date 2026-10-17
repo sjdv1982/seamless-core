@@ -566,7 +566,9 @@ async def evaluate_expression_placed(
                     if needs_input and not await _result_reachable(key.input_checksum):
                         from seamless import CacheMissError
 
-                        raise CacheMissError(key.input_checksum)
+                        raise CacheMissError(
+                            known if known is not None else key.input_checksum
+                        )
                     location = "local"
     if location == "local":
         if (
