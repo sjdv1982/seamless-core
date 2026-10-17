@@ -322,6 +322,7 @@ def test_construct_and_evaluate_expression_async_fetches_once(monkeypatch):
     assert key.celltype == "plain"
 
     get_expression_cache().clear()
+    from seamless import CacheMissError
     from seamless.checksum import expression
 
     original_resolution = Checksum.resolution
@@ -331,12 +332,11 @@ def test_construct_and_evaluate_expression_async_fetches_once(monkeypatch):
         calls.append((self, celltype))
         return await original_resolution(self, celltype)
 
+    def miss_local_buffer(checksum):
+        raise CacheMissError(checksum)
+
     monkeypatch.setattr(Checksum, "resolution", resolution)
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    monkeypatch.setattr(expression, "_get_local_buffer", miss_local_buffer)
     result = asyncio.run(
         evaluate_expression_local_async(
             key.input_checksum,

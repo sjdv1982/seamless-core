@@ -183,37 +183,51 @@ def test_concurrent_evaluate_expression_async_calls_share_one_evaluation(monkeyp
     source = Buffer({"a": "local"}, "plain")
     source_checksum = source.get_checksum()
     source_ref = source.tempref()
-    original_resolution = Checksum.resolution
+    original_evaluate = expression_mod._evaluate_expression_async
+    original_join = expression_mod._join_expression
     gate = asyncio.Event()
     entered = asyncio.Event()
-    resolutions = 0
+    second_joined = asyncio.Event()
+    evaluations = 0
+    joins = 0
 
-    async def gated_resolution(self, *args, **kwargs):
-        nonlocal resolutions
-        resolutions += 1
+    async def gated_evaluate(*args, **kwargs):
+        nonlocal evaluations
+        evaluations += 1
         entered.set()
         await gate.wait()
-        return await original_resolution(self, *args, **kwargs)
+        return await original_evaluate(*args, **kwargs)
 
-    monkeypatch.setattr(Checksum, "resolution", gated_resolution)
+    def tracked_join(active, member):
+        nonlocal joins
+        waiter = original_join(active, member)
+        joins += 1
+        if joins == 2:
+            second_joined.set()
+        return waiter
+
+    monkeypatch.setattr(expression_mod, "_evaluate_expression_async", gated_evaluate)
+    monkeypatch.setattr(expression_mod, "_join_expression", tracked_join)
 
     async def main():
         first = asyncio.create_task(
             evaluate_expression_local_async(source_checksum, "a", "plain", "str")
         )
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         second = asyncio.create_task(
             evaluate_expression_local_async(source_checksum, "a", "plain", "str")
         )
-        await asyncio.sleep(0)
+        await asyncio.wait_for(second_joined.wait(), timeout=5)
         gate.set()
-        return await asyncio.gather(first, second)
+        return await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
 
     try:
         expected = Buffer("local", "str").get_checksum()
         assert asyncio.run(main()) == [expected, expected]
-        assert resolutions == 1
+        assert evaluations == 1
+        assert joins == 2
     finally:
+        gate.set()
         source_ref.clear()
 
 
