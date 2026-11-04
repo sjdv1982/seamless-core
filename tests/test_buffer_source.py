@@ -104,6 +104,33 @@ def test_async_lookup_is_shared_between_waiters():
         unregister_buffer_sources(owner)
 
 
+def test_async_lookup_with_no_sources_returns_without_suspending():
+    from seamless.caching.buffer_source import BufferSourceRegistry
+
+    registry = BufferSourceRegistry()
+    checksum = _checksum(b"no local sources registered")
+
+    # The coroutine finishes on its first step: no event-loop turn is taken.
+    coro = registry.get_buffer_async(checksum)
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        assert stop.value is None
+    else:
+        coro.close()
+        raise AssertionError("an empty registry must not suspend")
+
+    async def run():
+        before = len(asyncio.all_tasks())
+        result = await registry.get_buffer_async(checksum)
+        return result, len(asyncio.all_tasks()) - before
+
+    result, new_tasks = asyncio.run(run())
+    assert result is None
+    assert new_tasks == 0
+    assert registry._pending == {}
+
+
 def test_sync_source_is_read_off_the_event_loop_thread():
     content = b"sync source is offloaded"
     checksum = _checksum(content)

@@ -20,7 +20,7 @@ def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monke
     monkeypatch.setattr(expression_mod, "_active_expressions", {})
     source = Buffer({"a": "local cancellation witness"}, "plain")
     source_checksum = source.get_checksum()
-    original_get_local_buffer = expression_mod._get_local_buffer
+    original_get_local_buffer = expression_mod._get_local_memory_buffer
 
     def require_source_fetch(checksum):
         # Keep the source available to resolution, while forcing this request
@@ -29,7 +29,7 @@ def test_local_in_flight_softcancel_deregisters_without_interrupting_fetch(monke
             raise CacheMissError(checksum)
         return original_get_local_buffer(checksum)
 
-    monkeypatch.setattr(expression_mod, "_get_local_buffer", require_source_fetch)
+    monkeypatch.setattr(expression_mod, "_get_local_memory_buffer", require_source_fetch)
     expression = Expression(
         source_checksum, "a", input_celltype="plain", celltype="str"
     )

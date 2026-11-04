@@ -44,6 +44,10 @@ def test_hashserver_only_input_dispatches_from_getter(monkeypatch):
     install_fake_remotes(monkeypatch, {}, {key: result_checksum}, calls)
 
     assert _cell(source_checksum).checksum == result_checksum
+    # The database record is written by the background buffer writer.
+    from seamless.caching import buffer_writer
+
+    buffer_writer.flush(timeout=5)
     assert calls == ["database:get", "jobserver:run", "database:set"]
 
 

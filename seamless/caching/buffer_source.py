@@ -197,8 +197,13 @@ class BufferSourceRegistry:
 
         Concurrent requests for the same checksum on the same loop share one
         lookup. A canceled waiter does not cancel work still used by others.
+        With no registered sources, this returns ``None`` at once: no shared
+        lookup is created and no event-loop turn is taken.
         """
         checksum = Checksum(checksum)
+        with self._lock:
+            if not self._sources_by_owner:
+                return None
         loop = asyncio.get_running_loop()
         key = (loop, checksum, async_only)
         pending = self._pending.get(key)
