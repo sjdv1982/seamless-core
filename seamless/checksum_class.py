@@ -189,6 +189,8 @@ class Checksum:
         else:
             buf = get_buffer_cache().get(self)
         if buf is None:
+            buf = get_buffer_cache().resolve_materialized_buffer(self)
+        if buf is None:
             try:
                 import seamless_remote.buffer_remote
             except ImportError:
@@ -238,6 +240,9 @@ class Checksum:
             buf = Buffer(btriv)
         else:
             buf = get_buffer_cache().get(self)
+
+        if buf is None:
+            buf = get_buffer_cache().resolve_materialized_buffer(self)
 
         if buf is None:
             try:
