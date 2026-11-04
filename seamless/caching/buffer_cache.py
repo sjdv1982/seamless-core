@@ -21,7 +21,7 @@ import time
 import weakref
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from seamless.caching import eviction_cost
 from seamless.caching import buffer_writer
@@ -116,14 +116,6 @@ class BufferCache:
         # track checksums that only have scratch refs
         self._scratch_refs: set[Checksum] = set()
         self.refholder_counts: Dict[Checksum, int] = {}
-        # Optional, owner-scoped sources for buffers that can be materialized
-        # from another local store. These records carry no checksum ownership.
-        self._materializers_by_owner: Dict[
-            Any, Dict[Checksum, Callable[[], Optional[bytes]]]
-        ] = {}
-        self._materializers_by_checksum: Dict[
-            Checksum, Dict[Any, Callable[[], Optional[bytes]]]
-        ] = {}
         self._memory_pressure_warning_at = 0.0
         self._memory_pressure_warning_state = None
 
@@ -178,75 +170,6 @@ class BufferCache:
                 self.strong_cache[checksum].buffer = buf
                 return buf
             return buf
-
-    def replace_materializers(
-        self,
-        owner: Any,
-        sources: Mapping[Checksum, Callable[[], Optional[bytes]]],
-    ) -> None:
-        """Replace one owner's checksum-to-bytes materializers atomically.
-
-        Materializers are lookup metadata only: they do not acquire refholder
-        claims, keep Buffers alive, or publish them. Their owner must remove or
-        replace them when the backing resource's lifecycle ends.
-        """
-        sources = dict(sources)
-        for resolver in sources.values():
-            if not callable(resolver):
-                raise TypeError("Buffer materializers must be callable")
-
-        with self.lock:
-            previous = self._materializers_by_owner.pop(owner, {})
-            for checksum in previous:
-                providers = self._materializers_by_checksum.get(checksum)
-                if providers is not None:
-                    providers.pop(owner, None)
-                    if not providers:
-                        self._materializers_by_checksum.pop(checksum, None)
-
-            if not sources:
-                return
-
-            self._materializers_by_owner[owner] = sources
-            for checksum, resolver in sources.items():
-                self._materializers_by_checksum.setdefault(checksum, {})[
-                    owner
-                ] = resolver
-
-    def unregister_materializers(self, owner: Any) -> None:
-        """Remove all materializers owned by one backing resource."""
-        self.replace_materializers(owner, {})
-
-    def resolve_materialized_buffer(self, checksum: Checksum) -> Optional[Buffer]:
-        """Reload a buffer from a registered source when its bytes still match.
-
-        The callback returns a byte snapshot. Verify that snapshot against the
-        requested checksum before registering or returning a Buffer, so stale
-        paths and changed files can never satisfy the lookup.
-        """
-        with self.lock:
-            resolvers = tuple(
-                self._materializers_by_checksum.get(checksum, {}).values()
-            )
-        if not resolvers:
-            return None
-
-        from seamless import Buffer
-        from seamless.checksum.calculate_checksum import calculate_checksum
-
-        for resolver in resolvers:
-            try:
-                content = resolver()
-            except Exception:
-                # A source is optional. Missing, unreadable, or concurrently
-                # removed backing data behaves like a cache miss.
-                continue
-            if not isinstance(content, bytes):
-                continue
-            if calculate_checksum(content) != checksum.hex():
-                continue
-            return Buffer(content, checksum=checksum)
-        return None
 
     # --- refs management ---
     def _ensure_entry_locked(

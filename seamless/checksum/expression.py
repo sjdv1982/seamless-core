@@ -137,11 +137,7 @@ def choose_expression_evaluation_location(
     ):
         return "local"
 
-    from seamless import CacheMissError
-
-    try:
-        _get_local_buffer(key.input_checksum)
-    except CacheMissError:
+    if not _has_local_buffer(key.input_checksum):
         return "remote"
     return "local"
 
@@ -410,7 +406,7 @@ async def _evaluate_expression_async(
         from seamless import CacheMissError
 
         try:
-            input_buffer = _get_local_buffer(key.input_checksum)
+            input_buffer = _get_local_memory_buffer(key.input_checksum)
         except CacheMissError:
             input_buffer = await key.input_checksum.resolution()
     else:
@@ -1133,7 +1129,8 @@ def _local_buffer_getter(checksum: Checksum) -> Callable[[], Buffer]:
     return get_buffer
 
 
-def _get_local_buffer(checksum: Checksum) -> Buffer:
+def _get_local_memory_buffer(checksum: Checksum) -> Buffer:
+    from seamless import CacheMissError
     from seamless.caching.buffer_cache import get_buffer_cache
     from seamless.checksum.cached_calculate_checksum import checksum_cache
 
@@ -1154,61 +1151,50 @@ def _get_local_buffer(checksum: Checksum) -> Buffer:
     if raw is not None:
         return Buffer(raw, checksum=checksum)
 
-    try:
-        from seamless_remote import buffer_remote
-    except ImportError:
-        pass
-    else:
-        from pathlib import Path
+    raise CacheMissError(checksum)
 
-        for client in getattr(buffer_remote, "_read_folders_clients", ()):
-            directory = getattr(client, "directory", None)
-            if directory is None:
-                continue
-            for path in (
-                Path(directory) / checksum.hex(),
-                Path(directory) / checksum.hex()[:2] / checksum.hex(),
-            ):
-                try:
-                    buffer = Buffer(path.read_bytes())
-                except (FileNotFoundError, IsADirectoryError):
-                    continue
-                if buffer.get_checksum() == checksum:
-                    return buffer
+
+def _get_local_buffer(checksum: Checksum) -> Buffer:
     from seamless import CacheMissError
+
+    try:
+        return _get_local_memory_buffer(checksum)
+    except CacheMissError:
+        pass
+
+    from seamless.caching.buffer_source import get_buffer_source
+
+    buffer = get_buffer_source(checksum)
+    if buffer is not None:
+        return buffer
 
     raise CacheMissError(checksum)
 
 
 async def _local_input_buffer_async(checksum: Checksum) -> Buffer | None:
-    """Find an input buffer in process memory or a configured read folder."""
-    checksum = Checksum(checksum)
+    """Find an input buffer in memory or a registered local source."""
     from seamless import CacheMissError
 
     try:
-        return _get_local_buffer(checksum)
+        buffer = _get_local_memory_buffer(checksum)
     except CacheMissError:
-        pass
+        from seamless.caching.buffer_source import get_buffer_source_async
 
-    try:
-        from seamless_remote import buffer_remote
-    except ImportError:
-        return None
-    for client in getattr(buffer_remote, "_read_folders_clients", ()):
-        buffer = await client.get_file_buffer(checksum)
-        if buffer is not None:
-            _tempref_expression_result(checksum, buffer=buffer)
-            return buffer
-    return None
+        buffer = await get_buffer_source_async(checksum)
+    if buffer is not None:
+        _tempref_expression_result(checksum, buffer=buffer)
+    return buffer
 
 
 def _has_local_buffer(checksum: Checksum) -> bool:
     from seamless import CacheMissError
 
     try:
-        _get_local_buffer(Checksum(checksum))
+        _get_local_memory_buffer(Checksum(checksum))
     except CacheMissError:
-        return False
+        from seamless.caching.buffer_source import has_buffer_source
+
+        return has_buffer_source(Checksum(checksum))
     return True
 
 
