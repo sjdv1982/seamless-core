@@ -189,12 +189,34 @@ class Checksum:
         else:
             buf = get_buffer_cache().get(self)
         if buf is None:
+            from seamless.caching.buffer_source import get_buffer_source
+
+            buf = get_buffer_source(self)
+        if buf is None:
+            from seamless.caching.buffer_source import (
+                get_async_only_buffer_source,
+                has_async_only_buffer_sources,
+            )
+
             try:
-                import seamless_remote.buffer_remote
+                import seamless_remote.buffer_remote as buffer_remote
             except ImportError:
-                pass
-            else:
-                coro = seamless_remote.buffer_remote.get_buffer(self)
+                buffer_remote = None
+
+            async def resolve_external():
+                if has_async_only_buffer_sources():
+                    buffer = await get_async_only_buffer_source(self)
+                    if buffer is not None:
+                        return buffer
+                if buffer_remote is None:
+                    return None
+                get_server_buffer = getattr(
+                    buffer_remote, "get_server_buffer", buffer_remote.get_buffer
+                )
+                return await get_server_buffer(self)
+
+            if has_async_only_buffer_sources() or buffer_remote is not None:
+                coro = resolve_external()
                 if is_worker():
                     buf = asyncio.run(coro)
                 else:
@@ -243,7 +265,9 @@ class Checksum:
             try:
                 import seamless_remote.buffer_remote as buffer_remote
             except ImportError:
-                pass
+                from seamless.caching.buffer_source import get_buffer_source_async
+
+                buf = await get_buffer_source_async(self)
             else:
                 buf = await buffer_remote.get_buffer(self)
 
