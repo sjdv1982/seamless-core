@@ -233,6 +233,7 @@ def test_empty_path_over_null_yields_null_for_every_legal_pair(
         pytest.fail("a null input must not fetch a buffer")
 
     monkeypatch.setattr(expression_mod, "_get_local_buffer", fail_if_fetched)
+    monkeypatch.setattr(expression_mod, "_get_local_memory_buffer", fail_if_fetched)
     expression = Expression(
         Checksum(NULL_CHECKSUM), input_celltype=input_celltype, celltype=celltype
     )
@@ -379,14 +380,14 @@ def test_module_softcancel_without_member_id_is_a_noop_returning_false(monkeypat
 
 def _require_source_resolution(monkeypatch, source_checksum):
     """Keep bytes resolvable, but route this source through the async gate."""
-    original_get_local_buffer = expression_mod._get_local_buffer
+    original_get_local_buffer = expression_mod._get_local_memory_buffer
 
     def require_fetch(checksum):
         if checksum == source_checksum:
             raise CacheMissError(checksum)
         return original_get_local_buffer(checksum)
 
-    monkeypatch.setattr(expression_mod, "_get_local_buffer", require_fetch)
+    monkeypatch.setattr(expression_mod, "_get_local_memory_buffer", require_fetch)
     return original_get_local_buffer
 
 
@@ -961,7 +962,7 @@ def test_deduplicated_failure_reaches_every_member_and_is_not_kept(monkeypatch):
         return results
 
     results = asyncio.run(main())
-    monkeypatch.setattr(expression_mod, "_get_local_buffer", original_get_local_buffer)
+    monkeypatch.setattr(expression_mod, "_get_local_memory_buffer", original_get_local_buffer)
     assert all(isinstance(r, ExpressionEvaluationError) for r in results), results
     assert applied == 1
     assert not _active_expressions

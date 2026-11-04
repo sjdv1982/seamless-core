@@ -209,6 +209,7 @@ def test_dummy_expression_preserves_its_checksum_without_fetching(monkeypatch):
         pytest.fail("a dummy Expression must not fetch its input buffer")
 
     monkeypatch.setattr(expression_module, "_get_local_buffer", fail_if_fetched)
+    monkeypatch.setattr(expression_module, "_get_local_memory_buffer", fail_if_fetched)
     assert expression.compute(execution="local") == source_checksum
 
 

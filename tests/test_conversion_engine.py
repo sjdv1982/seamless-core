@@ -182,11 +182,12 @@ def test_bool_to_int_reformats_without_fetching_input(monkeypatch):
     checksum = input_buffer.get_checksum()
     from seamless.checksum import expression
 
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    for name in ("_get_local_buffer", "_get_local_memory_buffer"):
+        monkeypatch.setattr(
+            expression,
+            name,
+            lambda *args, **kwargs: _raise_if_fetched(),
+        )
     result_checksum, result_buffer = convert_checksum(
         checksum, "bool", "int", _raise_if_fetched
     )
@@ -229,11 +230,12 @@ def test_every_trivial_conversion_needs_no_buffer(source, target, monkeypatch):
     checksum = input_buffer.get_checksum()
     from seamless.checksum import expression
 
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    for name in ("_get_local_buffer", "_get_local_memory_buffer"):
+        monkeypatch.setattr(
+            expression,
+            name,
+            lambda *args, **kwargs: _raise_if_fetched(),
+        )
     assert not conversion_needs_buffer(checksum, source, target)
     result_checksum, result_buffer = convert_checksum(
         checksum, source, target, _raise_if_fetched
@@ -256,11 +258,12 @@ def test_virtual_no_fetch_conversions_are_local(source, target, buffer, monkeypa
     checksum = input_buffer.get_checksum()
     from seamless.checksum import expression
 
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    for name in ("_get_local_buffer", "_get_local_memory_buffer"):
+        monkeypatch.setattr(
+            expression,
+            name,
+            lambda *args, **kwargs: _raise_if_fetched(),
+        )
     assert not conversion_needs_buffer(checksum, source, target)
     result_checksum, result_buffer = convert_checksum(
         checksum, source, target, _raise_if_fetched
@@ -275,11 +278,12 @@ def test_plain_number_to_bool_fails_without_fetch_and_is_local(monkeypatch):
     checksum = input_buffer.get_checksum()
     from seamless.checksum import expression
 
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    for name in ("_get_local_buffer", "_get_local_memory_buffer"):
+        monkeypatch.setattr(
+            expression,
+            name,
+            lambda *args, **kwargs: _raise_if_fetched(),
+        )
     assert not conversion_needs_buffer(checksum, "plain", "bool")
     with pytest.raises(SeamlessConversionError):
         convert_checksum(checksum, "plain", "bool", _raise_if_fetched)
@@ -298,11 +302,12 @@ def test_construct_and_evaluate_expression_sync_without_fetch(monkeypatch):
     get_expression_cache().clear()
     from seamless.checksum import expression
 
-    monkeypatch.setattr(
-        expression,
-        "_get_local_buffer",
-        lambda *args, **kwargs: _raise_if_fetched(),
-    )
+    for name in ("_get_local_buffer", "_get_local_memory_buffer"):
+        monkeypatch.setattr(
+            expression,
+            name,
+            lambda *args, **kwargs: _raise_if_fetched(),
+        )
     result = evaluate_expression_local(
         key.input_checksum,
         key.path,
@@ -337,6 +342,7 @@ def test_construct_and_evaluate_expression_async_fetches_once(monkeypatch):
 
     monkeypatch.setattr(Checksum, "resolution", resolution)
     monkeypatch.setattr(expression, "_get_local_buffer", miss_local_buffer)
+    monkeypatch.setattr(expression, "_get_local_memory_buffer", miss_local_buffer)
     result = asyncio.run(
         evaluate_expression_local_async(
             key.input_checksum,
