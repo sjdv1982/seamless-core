@@ -81,12 +81,32 @@ def register(buffer: "Buffer") -> None:
     _enqueue_entry(entry)
 
 
-def register_hash_type(checksum, word):
-    """Queue a metadata write on the buffer writer's existing worker."""
-    ensure_open("HashType writer register")
+def _database_write_target():
+    """Return database_remote if metadata writes have a destination, else None.
+
+    Without a configured database write server there is nothing to flush, so
+    metadata registration must neither queue work nor require seamless.close().
+    A database_remote without ``has_write_server`` is treated as writable.
+    """
     try:
         from seamless_remote import database_remote
     except ImportError:
+        return None
+    has_write_server = getattr(database_remote, "has_write_server", None)
+    if has_write_server is not None:
+        try:
+            if not has_write_server():
+                return None
+        except Exception:
+            return None
+    return database_remote
+
+
+def register_hash_type(checksum, word):
+    """Queue a metadata write on the buffer writer's existing worker."""
+    database_remote = _database_write_target()
+    ensure_open("HashType writer register", mark_required=database_remote is not None)
+    if database_remote is None:
         return
     _register_metadata(
         ("hash_type", checksum, word),
@@ -96,14 +116,11 @@ def register_hash_type(checksum, word):
 
 def register_expression_result(key, result):
     """Queue an Expression-result metadata write on the existing worker."""
-    ensure_open("Expression writer register")
-    try:
-        from seamless_remote import database_remote
-    except ImportError:
+    database_remote = _database_write_target()
+    ensure_open("Expression writer register", mark_required=database_remote is not None)
+    if database_remote is None:
         return
     input_hex, path, input_celltype, celltype = key
-    if hasattr(database_remote, 'has_write_server') and not database_remote.has_write_server():
-        return
     metadata_key = ("expression", input_hex, path, input_celltype, celltype)
     _register_metadata(
         metadata_key,
@@ -115,12 +132,9 @@ def register_expression_result(key, result):
 
 def register_celljoin_result(celljoin_hex, celltype, result):
     """Queue a celljoin-result metadata write on the existing worker."""
-    ensure_open("CellJoin writer register")
-    try:
-        from seamless_remote import database_remote
-    except ImportError:
-        return
-    if hasattr(database_remote, "has_write_server") and not database_remote.has_write_server():
+    database_remote = _database_write_target()
+    ensure_open("CellJoin writer register", mark_required=database_remote is not None)
+    if database_remote is None:
         return
     metadata_key = ("celljoin", celljoin_hex, celltype)
     _register_metadata(
