@@ -58,3 +58,23 @@ def test_expression_metadata_without_write_server_is_not_refused(monkeypatch, ca
     buffer_writer.register_expression_result((checksum.hex(), '', 'text', 'plain'), checksum)
     buffer_writer.flush(timeout=5)
     assert 'Queued metadata write' not in caplog.text
+
+
+def test_hash_type_without_write_server_is_not_queued_and_needs_no_close(monkeypatch):
+    import seamless
+    from seamless_remote import database_remote
+
+    buffer_writer.flush()
+    monkeypatch.setattr(database_remote, "has_write_server", lambda: False)
+    monkeypatch.setattr(seamless, "_require_close", False)
+
+    async def unexpected_write(*args):
+        raise AssertionError("no database is configured")
+
+    monkeypatch.setattr(database_remote, "set_hash_type", unexpected_write)
+    checksum = Buffer({"plain": "value"}, "plain").get_checksum()
+    buffer_writer.register_hash_type(checksum, 17)
+    buffer_writer.flush(timeout=5)
+
+    assert ("hash_type", checksum, 17) not in buffer_writer._entries
+    assert seamless._require_close is False
