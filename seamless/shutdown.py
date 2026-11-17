@@ -184,6 +184,11 @@ def _quiet_workers(worker_manager: Any, failures: List[str]) -> None:
                     file=sys.stderr,
                 )
         except Exception as exc:
+            if "after interpreter shutdown" in str(exc).lower():
+                # Executor already shut down (atexit ordering): the workers are
+                # terminated right after this anyway, so this is not a failure.
+                _debug(f"quiet skipped for {getattr(handle, 'name', '?')}: {exc}")
+                continue
             failures.append(
                 f"quiet request failed for {getattr(handle, 'name', '?')}: {exc}"
             )
