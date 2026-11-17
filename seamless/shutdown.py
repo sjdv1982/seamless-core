@@ -349,6 +349,7 @@ def close(*, from_atexit: bool = False) -> None:
                     type(holder).__name__,
                     id(holder),
                     exc,
+                    exc_info=bool(_DEBUG),  # full traceback under SEAMLESS_DEBUG_SHUTDOWN
                 )
         refholders = []
         gc.collect()
@@ -365,7 +366,8 @@ def close(*, from_atexit: bool = False) -> None:
             get_buffer_cache().force_clear_reference_accounting()
         except Exception as exc:
             logging.getLogger("seamless.references").warning(
-                "Reference lifecycle post-cleanup raised: %s", exc
+                "Reference lifecycle post-cleanup raised: %s", exc,
+                exc_info=bool(_DEBUG),
             )
 
         # Close remote client sessions/keepalive

@@ -38,6 +38,45 @@ TEMPREF_MINIMAL_INTEREST = 1 / 128
 _MEMORY_PRESSURE_WARNING_INTERVAL = 60.0
 _references_logger = logging.getLogger("seamless.references")
 
+# Opt-in diagnostics (zero cost when the env var is unset/empty/"0").
+# Read once at import time.  See refholder_history() and _debug_tempref().
+_REFDEBUG = os.environ.get("SEAMLESS_DEBUG_REFHOLDERS", "") not in ("", "0")
+# Opt-in "shadow mode": SEAMLESS_DEBUG_TEMPREF_SCALE multiplies every tempref's
+# fade_interval when its interest is computed (0.01 => 100x faster decay, so the
+# float overflow in current_interest hits after ~20 s idle instead of ~34 min).
+# SEAMLESS_DEBUG_EVICTION_LOOP=<seconds> runs run_eviction_once() periodically
+# from a daemon thread (started lazily at the first tempref()); production never
+# starts the eviction loop.  Both are inherited by spawned worker processes.
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value
+
+
+_TEMPREF_SCALE = _env_float("SEAMLESS_DEBUG_TEMPREF_SCALE", 1.0)
+_DEBUG_EVICTION_INTERVAL = _env_float("SEAMLESS_DEBUG_EVICTION_LOOP", 0.0)
+_REFDEBUG_RING = 24  # events kept per checksum
+_REFDEBUG_STACK = 6  # frames per event
+
+
+def _refdebug_stamp(t: Optional[float] = None) -> str:
+    t = time.time() if t is None else t
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+
+
+def _refdebug_stack(skip: int = 2) -> str:
+    import sys
+
+    frames = []
+    f = sys._getframe(skip)
+    while f is not None and len(frames) < _REFDEBUG_STACK:
+        name = os.path.basename(f.f_code.co_filename)
+        frames.append(f"{name}:{f.f_lineno}:{f.f_code.co_name}")
+        f = f.f_back
+    return " < ".join(frames)
+
 
 @dataclass
 class TempRef:
@@ -59,8 +98,8 @@ class TempRef:
         elapsed = time.time() - self.last_refreshed
         if elapsed <= 0 or self.fade_interval <= 0:
             return self.interest
-        # number of fade steps
-        steps = elapsed / self.fade_interval
+        # number of fade steps (SEAMLESS_DEBUG_TEMPREF_SCALE scales the interval)
+        steps = elapsed / (self.fade_interval * _TEMPREF_SCALE)
         return self.interest / (self.fade_factor**steps)
 
 
@@ -118,6 +157,69 @@ class BufferCache:
         self.refholder_counts: Dict[Checksum, int] = {}
         self._memory_pressure_warning_at = 0.0
         self._memory_pressure_warning_state = None
+        # SEAMLESS_DEBUG_REFHOLDERS: per-checksum ring of (time, sign, stack)
+        self._refholder_history: Optional[Dict[Checksum, list]] = (
+            {} if _REFDEBUG else None
+        )
+
+    # --- SEAMLESS_DEBUG_REFHOLDERS helpers (never called when off) ---
+    def _record_refholder_event(self, checksum: Checksum, sign: str) -> None:
+        ring = self._refholder_history.setdefault(checksum, [])
+        ring.append((time.time(), sign, _refdebug_stack(3)))
+        if len(ring) > _REFDEBUG_RING:
+            del ring[0]
+
+    def refholder_history(self, checksum: Checksum) -> list[str]:
+        """Formatted refholder inc/dec history (empty unless debugging is on)."""
+        if self._refholder_history is None:
+            return []
+        with self.lock:
+            ring = list(self._refholder_history.get(checksum, ()))
+        return [f"    {_refdebug_stamp(t)} {sign} {stack}" for t, sign, stack in ring]
+
+    def _ensure_debug_eviction_thread(self) -> None:
+        if getattr(self, "_debug_eviction_thread", None) is not None:
+            return
+        with self.lock:
+            if getattr(self, "_debug_eviction_thread", None) is not None:
+                return
+
+            def loop() -> None:
+                while True:
+                    time.sleep(_DEBUG_EVICTION_INTERVAL)
+                    try:
+                        self.run_eviction_once()
+                    except Exception:
+                        _references_logger.warning(
+                            "debug eviction pass failed", exc_info=True
+                        )
+
+            t = threading.Thread(target=loop, name="seamless-debug-eviction", daemon=True)
+            self._debug_eviction_thread = t
+            t.start()
+
+    def _debug_tempref(
+        self, checksum: Checksum, entry: "StrongEntry", where: str, only_stale: bool = False
+    ) -> None:
+        tr = entry.tempref
+        if tr is None:
+            return
+        age = time.time() - tr.last_refreshed
+        try:
+            interest = tr.current_interest()
+            state = f"interest={interest:.3g}" + (
+                " EXPIRED" if interest < TEMPREF_MINIMAL_INTEREST else ""
+            )
+        except Exception as exc:  # e.g. OverflowError (34, ...)
+            interest = None
+            state = f"current_interest raised {exc!r}"
+        if only_stale and interest is not None and interest >= TEMPREF_MINIMAL_INTEREST:
+            return  # live tempref: stay quiet (keeps normal-operation logs clean)
+        _references_logger.warning(
+            "[SEAMLESS_DEBUG_REFHOLDERS %s] tempref %s at %s: age=%.1fs fade=%s/%s %s",
+            _refdebug_stamp(), checksum.hex()[:16], where, age,
+            tr.fade_factor, tr.fade_interval, state,
+        )
 
     # --- registration & lookup ---
     def register(
@@ -236,6 +338,8 @@ class BufferCache:
         return entry.manual_refs != 0 or entry.has_refholder_bridge
 
     def _demote_locked(self, checksum: Checksum, entry: StrongEntry) -> bool:
+        if _REFDEBUG and entry.tempref is not None:
+            self._debug_tempref(checksum, entry, "demote-check", only_stale=True)
         if not self._can_demote_locked(entry):
             return False
         buf = entry.buffer
@@ -300,6 +404,8 @@ class BufferCache:
         """
 
         with self.lock:
+            if _REFDEBUG:
+                self._record_refholder_event(checksum, "+")
             if scratch is True:
                 self._scratch_refs.add(checksum)
             elif scratch is False:
@@ -320,6 +426,8 @@ class BufferCache:
         with self.lock:
             count = self.refholder_counts.get(checksum, 0)
             entry = self.strong_cache.get(checksum)
+            if _REFDEBUG:
+                self._record_refholder_event(checksum, "-" if count else "-(ignored)")
             if count == 0:
                 _references_logger.warning(
                     "Refholder decref ignored for checksum %s: refholder count is already zero",
@@ -389,6 +497,8 @@ class BufferCache:
         an owner's or producer's decision (`mark_scratch`, or a scratch
         incref/refholder), not the mere absence of a durable claim.
         """
+        if _DEBUG_EVICTION_INTERVAL > 0:
+            self._ensure_debug_eviction_thread()
         with self.lock:
             entry, _write_buffer = self._ensure_entry_locked(
                 checksum, buffer=buffer, scratch=True
@@ -544,6 +654,8 @@ class BufferCache:
                 if e.tempref is None:
                     continue
                 if e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST:
+                    if _REFDEBUG:
+                        self._debug_tempref(k, e, "expiry")
                     e.tempref = None
                     self._demote_locked(k, e)
 

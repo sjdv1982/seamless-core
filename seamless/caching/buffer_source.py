@@ -9,12 +9,16 @@ checksum before creating a ``Buffer``.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
 from seamless.checksum_class import Checksum
 
+
+# Opt-in debug switch: skip all local buffer sources on lookup.
+_NO_READSOURCE = os.environ.get("SEAMLESS_DEBUG_NO_MOUNT_READSOURCE", "") not in ("", "0")
 
 BufferResult = Any
 BufferGetter = Callable[[Checksum], BufferResult | None]
@@ -100,6 +104,8 @@ class BufferSourceRegistry:
         )
 
     def _snapshot(self) -> tuple[BufferSource, ...]:
+        if _NO_READSOURCE:  # SEAMLESS_DEBUG_NO_MOUNT_READSOURCE (mounts + read-folders)
+            return ()
         with self._lock:
             return tuple(
                 source

@@ -9,6 +9,7 @@ acquisition counts.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import weakref
 from collections import defaultdict
@@ -16,6 +17,7 @@ from typing import Any, Iterable
 
 from . import is_worker
 from .checksum_class import Checksum
+from .caching.buffer_cache import _REFDEBUG, _refdebug_stamp
 
 
 _refholders: weakref.WeakValueDictionary[int, object] = weakref.WeakValueDictionary()
@@ -62,6 +64,7 @@ def safe_release_refholder(holder: object) -> None:
                 type(holder).__name__,
                 id(holder),
                 exc,
+                exc_info=bool(os.environ.get("SEAMLESS_DEBUG_SHUTDOWN")),
             )
         except Exception:
             # Logging itself may be unavailable during interpreter teardown.
@@ -142,14 +145,27 @@ def audit_reference_accounting(
         checksum_claims = claim_index.get(checksum, [])
         claim_count = len(checksum_claims)
         if count > claim_count:
-            _logger.warning(
-                "Checksum %s has refholder count %d but only %d live claims; %d is unattributed\n%s",
-                checksum.hex(),
-                count,
-                claim_count,
-                count - claim_count,
-                "\n".join(_claim_lines(checksum_claims)),
-            )
+            if _REFDEBUG:
+                # SEAMLESS_DEBUG_REFHOLDERS: timestamp + inc/dec history
+                _logger.warning(
+                    "[%s] Checksum %s has refholder count %d but only %d live claims; %d is unattributed\n%s\n  history (oldest first; + incref, - decref):\n%s",
+                    _refdebug_stamp(),
+                    checksum.hex(),
+                    count,
+                    claim_count,
+                    count - claim_count,
+                    "\n".join(_claim_lines(checksum_claims)),
+                    "\n".join(cache.refholder_history(checksum)) or "    (none recorded)",
+                )
+            else:
+                _logger.warning(
+                    "Checksum %s has refholder count %d but only %d live claims; %d is unattributed\n%s",
+                    checksum.hex(),
+                    count,
+                    claim_count,
+                    count - claim_count,
+                    "\n".join(_claim_lines(checksum_claims)),
+                )
         elif claim_count > count:
             lines = "\n".join(_claim_lines(checksum_claims))
             _logger.warning(
