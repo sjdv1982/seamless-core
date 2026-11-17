@@ -120,7 +120,7 @@ def force_expiry(
         cache.hard_cap = 0
 
     try:
-        cache.run_eviction_once()
+        cache.run_eviction_once(force_expire_temprefs=True)
         gc.collect()
         gc.collect()
     finally:

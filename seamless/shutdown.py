@@ -272,6 +272,14 @@ def close(*, from_atexit: bool = False) -> None:
                     "[seamless.close] called via atexit; call seamless.close() earlier to ensure all buffers/workers shut down cleanly (atexit is best-effort/ noisier)",
                     file=sys.stderr,
                 )
+        # Stop periodic eviction first, so that no eviction pass races with the
+        # lifecycle audit, holder release and force_clear_reference_accounting.
+        try:
+            from .caching.buffer_cache import stop_global_eviction
+
+            stop_global_eviction()
+        except Exception as exc:
+            failures.append(f"stopping eviction thread failed: {exc}")
         worker_mod = _module("seamless_transformer.worker")
         worker_manager = (
             getattr(worker_mod, "_worker_manager", None) if worker_mod else None
