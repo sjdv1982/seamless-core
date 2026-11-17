@@ -353,6 +353,9 @@ def test_writer_flush_precedes_holder_cleanup_and_accounting_is_empty():
             buffer = Buffer(b'flush-order')
             checksum = buffer.get_checksum()
             cache = get_buffer_cache()
+            # Keep the entry pending: otherwise the writer thread may drain it
+            # before close(), and close() then (correctly) never calls flush.
+            buffer_writer._enqueue_entry = lambda entry: None
             cache.incref_refholder(checksum, buffer=buffer)
             original_flush = buffer_writer.flush
             def flush(*args, **kwargs):
