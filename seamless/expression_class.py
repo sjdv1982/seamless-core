@@ -488,12 +488,17 @@ class Expression:
         if self._refholds_released:
             return
         object.__setattr__(self, "_refholds_released", True)
-        if self._input_refheld is not None:
-            self._input_refheld.decref_refholder()
-            object.__setattr__(self, "_input_refheld", None)
+        from .reference_lifecycle import release_all
+
+        actions = []
+        input_refheld = self._input_refheld
+        object.__setattr__(self, "_input_refheld", None)
+        if input_refheld is not None:
+            actions.append(input_refheld.decref_refholder)
         if self._result_refheld and self._result_checksum is not None:
-            self._result_checksum.decref_refholder()
-            object.__setattr__(self, "_result_refheld", False)
+            actions.append(self._result_checksum.decref_refholder)
+        object.__setattr__(self, "_result_refheld", False)
+        release_all(*actions)
 
     def __del__(self):
         try:

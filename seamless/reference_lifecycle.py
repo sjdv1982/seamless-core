@@ -71,6 +71,27 @@ def safe_release_refholder(holder: object) -> None:
             pass
 
 
+def release_all(*actions) -> None:
+    """Run every release action even if some raise; re-raise the first error.
+
+    Release loops must never stop partway: the holder has already dropped its
+    claims, so any checksum left undecremented would show up as an unattributed
+    refholder count.  Later errors are logged, the first one is raised once.
+    """
+
+    first: BaseException | None = None
+    for action in actions:
+        try:
+            action()
+        except Exception as exc:
+            if first is None:
+                first = exc
+            else:
+                _logger.warning("further release error: %r", exc, exc_info=True)
+    if first is not None:
+        raise first
+
+
 def _claim_sort_key(item: tuple[object, str]) -> tuple[str, str, int]:
     holder, role = item
     return (type(holder).__name__, role, id(holder))
@@ -208,5 +229,6 @@ __all__ = [
     "collect_refholder_claims",
     "register_refholder",
     "registered_refholders",
+    "release_all",
     "safe_release_refholder",
 ]
