@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 import weakref
@@ -35,6 +36,7 @@ DEFAULT_SOFT_CAP = 5 * 1024**3
 DEFAULT_HARD_CAP = 50 * 1024**3
 DEFAULT_BENEFIT_PER_GB = 2.0
 TEMPREF_MINIMAL_INTEREST = 1 / 128
+_MAX_FADE_LOG2 = 1000.0  # < 1024, the float64 exponent limit
 _MEMORY_PRESSURE_WARNING_INTERVAL = 60.0
 _references_logger = logging.getLogger("seamless.references")
 
@@ -100,7 +102,17 @@ class TempRef:
             return self.interest
         # number of fade steps (SEAMLESS_DEBUG_TEMPREF_SCALE scales the interval)
         steps = elapsed / (self.fade_interval * _TEMPREF_SCALE)
-        return self.interest / (self.fade_factor**steps)
+        if self.fade_factor <= 1:
+            return self.interest  # no decay
+        # fade_factor**steps overflows a float (OverflowError 34) once
+        # steps*log2(fade_factor) >= 1024; long before that the interest is
+        # effectively zero, so clamp instead of raising.
+        if steps * math.log2(self.fade_factor) >= _MAX_FADE_LOG2:
+            return 0.0
+        try:
+            return self.interest / (self.fade_factor**steps)
+        except (OverflowError, ZeroDivisionError):
+            return 0.0
 
 
 @dataclass
@@ -323,7 +335,16 @@ class BufferCache:
     def _has_live_tempref_locked(self, entry: StrongEntry) -> bool:
         if entry.tempref is None:
             return False
-        return entry.tempref.current_interest() >= TEMPREF_MINIMAL_INTEREST
+        try:
+            return entry.tempref.current_interest() >= TEMPREF_MINIMAL_INTEREST
+        except Exception:
+            # A tempref whose interest cannot be computed is treated as
+            # expired: demotion bookkeeping must never be aborted by it.
+            _references_logger.warning(
+                "tempref interest computation failed; treating as expired",
+                exc_info=True,
+            )
+            return False
 
     def _can_demote_locked(self, entry: StrongEntry) -> bool:
         return (
@@ -347,7 +368,14 @@ class BufferCache:
             self.weak_cache[checksum] = buf
         if self.strong_cache.get(checksum) is entry:
             del self.strong_cache[checksum]
-            eviction_cost.remove_interest(checksum)
+            try:
+                eviction_cost.remove_interest(checksum)
+            except Exception:
+                _references_logger.warning(
+                    "eviction_cost.remove_interest failed for %s",
+                    checksum.hex(),
+                    exc_info=True,
+                )
         return True
 
     def incref(
@@ -471,9 +499,17 @@ class BufferCache:
                 # Manual references are deliberately part of the final forced
                 # cleanup.  They are warned about by the shutdown audit before
                 # this method is called, but must not keep the cache alive.
-                entry.manual_refs = 0
-                entry.has_refholder_bridge = False
-                self._demote_locked(checksum, entry)
+                # One failing entry must not abort the rest of the cleanup.
+                try:
+                    entry.manual_refs = 0
+                    entry.has_refholder_bridge = False
+                    self._demote_locked(checksum, entry)
+                except Exception:
+                    _references_logger.warning(
+                        "forced cleanup failed for checksum %s; continuing",
+                        checksum.hex(),
+                        exc_info=True,
+                    )
 
     def tempref(
         self,
@@ -640,7 +676,10 @@ class BufferCache:
         cost = eviction_cost.get_cost(checksum, buffer_length=entry.size)
         if cost == float("inf"):
             return float("inf")
-        loss = cost * entry.interest()
+        try:
+            loss = cost * entry.interest()
+        except Exception:
+            return float("inf")  # cannot score: do not evict
         # cost-per-GB
         return loss / size_gb
 
@@ -653,11 +692,19 @@ class BufferCache:
             for k, e in list(self.strong_cache.items()):
                 if e.tempref is None:
                     continue
-                if e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST:
-                    if _REFDEBUG:
-                        self._debug_tempref(k, e, "expiry")
-                    e.tempref = None
-                    self._demote_locked(k, e)
+                try:
+                    expired = e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST
+                    if expired:
+                        if _REFDEBUG:
+                            self._debug_tempref(k, e, "expiry")
+                        e.tempref = None
+                        self._demote_locked(k, e)
+                except Exception:
+                    _references_logger.warning(
+                        "tempref expiry failed for checksum %s; continuing",
+                        k.hex(),
+                        exc_info=True,
+                    )
 
             before = self._strong_memory_usage()
             if before <= self.soft_cap:
