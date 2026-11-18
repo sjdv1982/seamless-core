@@ -461,7 +461,7 @@ class CellBase:
                 finally:
                     lease._release_refholds()
             else:
-                checksum = backend.checksum
+                return backend.fingertip()
         else:
             self._sync_recipe()
             if self._standalone_exception is not None or self._miswired():
