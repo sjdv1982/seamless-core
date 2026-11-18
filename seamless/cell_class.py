@@ -341,11 +341,19 @@ class CellBase:
         object.__setattr__(self, "_refholds_released", True)
         from .checksum_class import Checksum
 
+        from .reference_lifecycle import release_all
+
         input_ref = getattr(self, "_standalone_input_ref", None)
-        if isinstance(input_ref, Checksum):
-            input_ref.decref_refholder()
-        self._set_result_checksum(None)
+
+        def release_input():
+            if isinstance(input_ref, Checksum):
+                input_ref.decref_refholder()
+
+        def release_result():
+            self._set_result_checksum(None)
+
         self._standalone_expression = None
+        release_all(release_input, release_result)
 
     def __del__(self):
         try:

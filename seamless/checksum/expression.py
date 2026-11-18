@@ -78,10 +78,11 @@ class _ActiveExpression:
         )
 
     def _release_refholds(self):
+        from seamless.reference_lifecycle import release_all
+
         claims = self.input_claims
         self.input_claims = ()
-        for checksum in claims:
-            checksum.decref_refholder()
+        release_all(*(checksum.decref_refholder for checksum in claims))
 
 
 def get_expression_cache() -> dict[tuple, Checksum]:
@@ -230,7 +231,11 @@ def evaluate_expression_local(
                 _lingering_expressions.pop(cache_key, None)
             if active.linger is not None:
                 active.linger.cancel()
-        active._release_refholds()
+        try:
+            active._release_refholds()
+        except Exception:
+            # Never let a release error replace the evaluation result/exception.
+            _logger.warning("active expression release failed", exc_info=True)
 
 
 def _evaluate_expression_local_unshared(
@@ -783,9 +788,14 @@ def _discard_active_expression(key, active):
             _lingering_expressions.pop(key, None)
         if active.linger is not None:
             active.linger.cancel()
-    active._release_refholds()
-    if not active.result_future.done():
-        active.result_future.set_exception(asyncio.CancelledError())
+    try:
+        active._release_refholds()
+    except Exception:
+        _logger.warning("active expression release failed", exc_info=True)
+    finally:
+        # Awaiters must be woken whatever the release did.
+        if not active.result_future.done():
+            active.result_future.set_exception(asyncio.CancelledError())
 
 
 def softcancel_expression(cache_key, member_id) -> bool:

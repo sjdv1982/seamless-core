@@ -71,7 +71,11 @@ def test_register_refs_and_eviction():
     assert stats_before["strong_count"] == 2
     assert stats_before["strong_bytes"] >= size_big
 
-    before, after = cache.run_eviction_once()
+    # TEMPORARY (phase 2a): live temprefs are no longer pressure-evictable, so this
+    # test forces expiry (test-only parameter).  It models the original cost-based
+    # tempref eviction and is superseded by phase 2b (tiered tempref eviction,
+    # seamless/plans/buffer-eviction-plan.md); rewrite it there.
+    before, after = cache.run_eviction_once(force_expire_temprefs=True)
     stats_after = cache.stats()
     # should be at or below soft cap
     assert stats_after["strong_bytes"] <= soft_cap

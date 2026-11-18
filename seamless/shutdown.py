@@ -184,6 +184,11 @@ def _quiet_workers(worker_manager: Any, failures: List[str]) -> None:
                     file=sys.stderr,
                 )
         except Exception as exc:
+            if "after interpreter shutdown" in str(exc).lower():
+                # Executor already shut down (atexit ordering): the workers are
+                # terminated right after this anyway, so this is not a failure.
+                _debug(f"quiet skipped for {getattr(handle, 'name', '?')}: {exc}")
+                continue
             failures.append(
                 f"quiet request failed for {getattr(handle, 'name', '?')}: {exc}"
             )
@@ -267,6 +272,14 @@ def close(*, from_atexit: bool = False) -> None:
                     "[seamless.close] called via atexit; call seamless.close() earlier to ensure all buffers/workers shut down cleanly (atexit is best-effort/ noisier)",
                     file=sys.stderr,
                 )
+        # Stop periodic eviction first, so that no eviction pass races with the
+        # lifecycle audit, holder release and force_clear_reference_accounting.
+        try:
+            from .caching.buffer_cache import stop_global_eviction
+
+            stop_global_eviction()
+        except Exception as exc:
+            failures.append(f"stopping eviction thread failed: {exc}")
         worker_mod = _module("seamless_transformer.worker")
         worker_manager = (
             getattr(worker_mod, "_worker_manager", None) if worker_mod else None
@@ -349,6 +362,7 @@ def close(*, from_atexit: bool = False) -> None:
                     type(holder).__name__,
                     id(holder),
                     exc,
+                    exc_info=bool(_DEBUG),  # full traceback under SEAMLESS_DEBUG_SHUTDOWN
                 )
         refholders = []
         gc.collect()
@@ -365,7 +379,8 @@ def close(*, from_atexit: bool = False) -> None:
             get_buffer_cache().force_clear_reference_accounting()
         except Exception as exc:
             logging.getLogger("seamless.references").warning(
-                "Reference lifecycle post-cleanup raised: %s", exc
+                "Reference lifecycle post-cleanup raised: %s", exc,
+                exc_info=bool(_DEBUG),
             )
 
         # Close remote client sessions/keepalive

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 import weakref
@@ -35,8 +36,64 @@ DEFAULT_SOFT_CAP = 5 * 1024**3
 DEFAULT_HARD_CAP = 50 * 1024**3
 DEFAULT_BENEFIT_PER_GB = 2.0
 TEMPREF_MINIMAL_INTEREST = 1 / 128
+_MAX_FADE_LOG2 = 1000.0  # < 1024, the float64 exponent limit
 _MEMORY_PRESSURE_WARNING_INTERVAL = 60.0
 _references_logger = logging.getLogger("seamless.references")
+
+# Opt-in diagnostics (zero cost when the env var is unset/empty/"0").
+# Read once at import time.  See refholder_history() and _debug_tempref().
+_REFDEBUG = os.environ.get("SEAMLESS_DEBUG_REFHOLDERS", "") not in ("", "0")
+# Opt-in "shadow mode": SEAMLESS_DEBUG_TEMPREF_SCALE multiplies every tempref's
+# fade_interval when its interest is computed (0.01 => 100x faster decay, so the
+# float overflow in current_interest hits after ~20 s idle instead of ~34 min).
+# Periodic eviction runs from a daemon thread (see start_eviction_thread):
+# SEAMLESS_EVICTION_INTERVAL=<seconds>: ON by default (unset or empty = 5 s);
+# "0" (or any value <= 0) turns it off; a positive value is the interval.
+# This is the single setting (the former SEAMLESS_DEBUG_EVICTION_LOOP no longer
+# exists).  It is inherited by spawned worker processes, which never run a cache
+# (get_buffer_cache raises).
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value
+
+
+DEFAULT_EVICTION_INTERVAL = 5.0  # on by default; "0" = off; positive = seconds between passes
+
+
+def eviction_interval_from_env() -> float:
+    """Seconds between eviction passes: unset/empty = 5, "0" = off.  Read at call time."""
+    raw = os.environ.get("SEAMLESS_EVICTION_INTERVAL")
+    if raw is None or raw == "":
+        return DEFAULT_EVICTION_INTERVAL
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_EVICTION_INTERVAL  # unparsable: keep the default (on)
+
+
+_TEMPREF_SCALE = _env_float("SEAMLESS_DEBUG_TEMPREF_SCALE", 1.0)
+_REFDEBUG_RING = 24  # events kept per checksum
+_REFDEBUG_STACK = 6  # frames per event
+
+
+def _refdebug_stamp(t: Optional[float] = None) -> str:
+    t = time.time() if t is None else t
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+
+
+def _refdebug_stack(skip: int = 2) -> str:
+    import sys
+
+    frames = []
+    f = sys._getframe(skip)
+    while f is not None and len(frames) < _REFDEBUG_STACK:
+        name = os.path.basename(f.f_code.co_filename)
+        frames.append(f"{name}:{f.f_lineno}:{f.f_code.co_name}")
+        f = f.f_back
+    return " < ".join(frames)
 
 
 @dataclass
@@ -59,9 +116,19 @@ class TempRef:
         elapsed = time.time() - self.last_refreshed
         if elapsed <= 0 or self.fade_interval <= 0:
             return self.interest
-        # number of fade steps
-        steps = elapsed / self.fade_interval
-        return self.interest / (self.fade_factor**steps)
+        # number of fade steps (SEAMLESS_DEBUG_TEMPREF_SCALE scales the interval)
+        steps = elapsed / (self.fade_interval * _TEMPREF_SCALE)
+        if self.fade_factor <= 1:
+            return self.interest  # no decay
+        # fade_factor**steps overflows a float (OverflowError 34) once
+        # steps*log2(fade_factor) >= 1024; long before that the interest is
+        # effectively zero, so clamp instead of raising.
+        if steps * math.log2(self.fade_factor) >= _MAX_FADE_LOG2:
+            return 0.0
+        try:
+            return self.interest / (self.fade_factor**steps)
+        except (OverflowError, ZeroDivisionError):
+            return 0.0
 
 
 @dataclass
@@ -111,6 +178,8 @@ class BufferCache:
         # eviction background task controls
         self._eviction_task = None
         self._eviction_interval = None
+        self._eviction_thread: Optional[threading.Thread] = None
+        self._eviction_stop: Optional[threading.Event] = None
         # track sizes for checksums so we can recreate entries after demotion
         self._sizes: Dict[Checksum, Optional[int]] = {}
         # track checksums that only have scratch refs
@@ -118,6 +187,94 @@ class BufferCache:
         self.refholder_counts: Dict[Checksum, int] = {}
         self._memory_pressure_warning_at = 0.0
         self._memory_pressure_warning_state = None
+        # SEAMLESS_DEBUG_REFHOLDERS: per-checksum ring of (time, sign, stack)
+        self._refholder_history: Optional[Dict[Checksum, list]] = (
+            {} if _REFDEBUG else None
+        )
+
+    # --- SEAMLESS_DEBUG_REFHOLDERS helpers (never called when off) ---
+    def _record_refholder_event(self, checksum: Checksum, sign: str) -> None:
+        ring = self._refholder_history.setdefault(checksum, [])
+        ring.append((time.time(), sign, _refdebug_stack(3)))
+        if len(ring) > _REFDEBUG_RING:
+            del ring[0]
+
+    def refholder_history(self, checksum: Checksum) -> list[str]:
+        """Formatted refholder inc/dec history (empty unless debugging is on)."""
+        if self._refholder_history is None:
+            return []
+        with self.lock:
+            ring = list(self._refholder_history.get(checksum, ()))
+        return [f"    {_refdebug_stamp(t)} {sign} {stack}" for t, sign, stack in ring]
+
+    # --- periodic eviction thread ---
+    def start_eviction_thread(self, interval: Optional[float] = None) -> bool:
+        """Start the periodic eviction daemon thread; idempotent.
+
+        Returns True if a thread was started now.  interval <= 0 means "off"
+        (SEAMLESS_EVICTION_INTERVAL=0).  Eviction is lock-guarded
+        work behind self.lock, so it needs no event loop.
+        """
+        if interval is None:
+            interval = eviction_interval_from_env()
+        if interval <= 0:
+            return False
+        with self.lock:
+            thread = self._eviction_thread
+            if thread is not None and thread.is_alive():
+                return False
+            stop = threading.Event()
+
+            def run() -> None:
+                while not stop.wait(interval):
+                    try:
+                        self.run_eviction_once()
+                    except Exception:
+                        _references_logger.warning(
+                            "periodic eviction pass failed", exc_info=True
+                        )
+
+            thread = threading.Thread(
+                target=run, name="seamless-eviction", daemon=True
+            )
+            self._eviction_stop = stop
+            self._eviction_thread = thread
+            thread.start()
+            return True
+
+    def stop_eviction_thread(self, timeout: float = 2.0) -> None:
+        """Stop and join the eviction thread (no-op if not running)."""
+        with self.lock:
+            thread, stop = self._eviction_thread, self._eviction_stop
+            self._eviction_thread = None
+            self._eviction_stop = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+
+    def _debug_tempref(
+        self, checksum: Checksum, entry: "StrongEntry", where: str, only_stale: bool = False
+    ) -> None:
+        tr = entry.tempref
+        if tr is None:
+            return
+        age = time.time() - tr.last_refreshed
+        try:
+            interest = tr.current_interest()
+            state = f"interest={interest:.3g}" + (
+                " EXPIRED" if interest < TEMPREF_MINIMAL_INTEREST else ""
+            )
+        except Exception as exc:  # e.g. OverflowError (34, ...)
+            interest = None
+            state = f"current_interest raised {exc!r}"
+        if only_stale and interest is not None and interest >= TEMPREF_MINIMAL_INTEREST:
+            return  # live tempref: stay quiet (keeps normal-operation logs clean)
+        _references_logger.warning(
+            "[SEAMLESS_DEBUG_REFHOLDERS %s] tempref %s at %s: age=%.1fs fade=%s/%s %s",
+            _refdebug_stamp(), checksum.hex()[:16], where, age,
+            tr.fade_factor, tr.fade_interval, state,
+        )
 
     # --- registration & lookup ---
     def register(
@@ -221,7 +378,16 @@ class BufferCache:
     def _has_live_tempref_locked(self, entry: StrongEntry) -> bool:
         if entry.tempref is None:
             return False
-        return entry.tempref.current_interest() >= TEMPREF_MINIMAL_INTEREST
+        try:
+            return entry.tempref.current_interest() >= TEMPREF_MINIMAL_INTEREST
+        except Exception:
+            # A tempref whose interest cannot be computed is treated as
+            # expired: demotion bookkeeping must never be aborted by it.
+            _references_logger.warning(
+                "tempref interest computation failed; treating as expired",
+                exc_info=True,
+            )
+            return False
 
     def _can_demote_locked(self, entry: StrongEntry) -> bool:
         return (
@@ -236,6 +402,8 @@ class BufferCache:
         return entry.manual_refs != 0 or entry.has_refholder_bridge
 
     def _demote_locked(self, checksum: Checksum, entry: StrongEntry) -> bool:
+        if _REFDEBUG and entry.tempref is not None:
+            self._debug_tempref(checksum, entry, "demote-check", only_stale=True)
         if not self._can_demote_locked(entry):
             return False
         buf = entry.buffer
@@ -243,7 +411,14 @@ class BufferCache:
             self.weak_cache[checksum] = buf
         if self.strong_cache.get(checksum) is entry:
             del self.strong_cache[checksum]
-            eviction_cost.remove_interest(checksum)
+            try:
+                eviction_cost.remove_interest(checksum)
+            except Exception:
+                _references_logger.warning(
+                    "eviction_cost.remove_interest failed for %s",
+                    checksum.hex(),
+                    exc_info=True,
+                )
         return True
 
     def incref(
@@ -300,6 +475,8 @@ class BufferCache:
         """
 
         with self.lock:
+            if _REFDEBUG:
+                self._record_refholder_event(checksum, "+")
             if scratch is True:
                 self._scratch_refs.add(checksum)
             elif scratch is False:
@@ -320,6 +497,8 @@ class BufferCache:
         with self.lock:
             count = self.refholder_counts.get(checksum, 0)
             entry = self.strong_cache.get(checksum)
+            if _REFDEBUG:
+                self._record_refholder_event(checksum, "-" if count else "-(ignored)")
             if count == 0:
                 _references_logger.warning(
                     "Refholder decref ignored for checksum %s: refholder count is already zero",
@@ -363,9 +542,17 @@ class BufferCache:
                 # Manual references are deliberately part of the final forced
                 # cleanup.  They are warned about by the shutdown audit before
                 # this method is called, but must not keep the cache alive.
-                entry.manual_refs = 0
-                entry.has_refholder_bridge = False
-                self._demote_locked(checksum, entry)
+                # One failing entry must not abort the rest of the cleanup.
+                try:
+                    entry.manual_refs = 0
+                    entry.has_refholder_bridge = False
+                    self._demote_locked(checksum, entry)
+                except Exception:
+                    _references_logger.warning(
+                        "forced cleanup failed for checksum %s; continuing",
+                        checksum.hex(),
+                        exc_info=True,
+                    )
 
     def tempref(
         self,
@@ -530,12 +717,24 @@ class BufferCache:
         cost = eviction_cost.get_cost(checksum, buffer_length=entry.size)
         if cost == float("inf"):
             return float("inf")
-        loss = cost * entry.interest()
+        try:
+            loss = cost * entry.interest()
+        except Exception:
+            return float("inf")  # cannot score: do not evict
         # cost-per-GB
         return loss / size_gb
 
-    def run_eviction_once(self) -> Tuple[int, int]:
+    def run_eviction_once(
+        self, *, force_expire_temprefs: bool = False
+    ) -> Tuple[int, int]:
         """Run a single eviction pass.
+
+        Expired temprefs are always dropped.  Under memory pressure only entries
+        WITHOUT a live (unexpired) tempref, manual ref or refholder are evicted:
+        a live tempref is a bounded same-path handoff and expires by itself.
+        ``force_expire_temprefs=True`` is the test-only "forced expiry" of the
+        reference-lifecycle contract (section 3): live temprefs then become
+        eviction candidates and are dropped.  Production never passes it.
 
         Returns (before_bytes, after_bytes) strong-cache totals.
         """
@@ -543,20 +742,32 @@ class BufferCache:
             for k, e in list(self.strong_cache.items()):
                 if e.tempref is None:
                     continue
-                if e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST:
-                    e.tempref = None
-                    self._demote_locked(k, e)
+                try:
+                    expired = e.tempref.current_interest() < TEMPREF_MINIMAL_INTEREST
+                    if expired:
+                        if _REFDEBUG:
+                            self._debug_tempref(k, e, "expiry")
+                        e.tempref = None
+                        self._demote_locked(k, e)
+                except Exception:
+                    _references_logger.warning(
+                        "tempref expiry failed for checksum %s; continuing",
+                        k.hex(),
+                        exc_info=True,
+                    )
 
             before = self._strong_memory_usage()
             if before <= self.soft_cap:
                 return before, before
 
             # Build candidate list (checksum, score). Manual and refholder
-            # protection never becomes a candidate; a tempref is bounded cache
-            # interest and can be dropped under memory pressure.
+            # protection never becomes a candidate, and neither does a live
+            # tempref (unless the test-only forcing parameter is given).
             candidates = []
             for k, e in self.strong_cache.items():
                 if self._eviction_protected_locked(e):
+                    continue
+                if not force_expire_temprefs and self._has_live_tempref_locked(e):
                     continue
                 score = self._candidate_score(k, e)
                 candidates.append((score, k, e))
@@ -573,9 +784,9 @@ class BufferCache:
                 # If score is +inf, skip (unknown sizes)
                 if score == float("inf"):
                     continue
-                # Eviction discards bounded tempref interest before applying
-                # the common demotion predicate.
-                e.tempref = None
+                if force_expire_temprefs:
+                    # Forced expiry (tests only): discard the tempref first.
+                    e.tempref = None
                 # subtract size
                 if e.size:
                     current -= int(e.size)
@@ -676,7 +887,17 @@ def get_buffer_cache() -> BufferCache:
     global _cache_instance
     if _cache_instance is None:
         _cache_instance = BufferCache()
+        # Main process only (workers raised above).  On by default (5 s);
+        # SEAMLESS_EVICTION_INTERVAL=0 turns it off.
+        _cache_instance.start_eviction_thread()
     return _cache_instance
+
+
+def stop_global_eviction(timeout: float = 2.0) -> None:
+    """Stop the global cache's eviction thread without creating a cache."""
+    cache = _cache_instance
+    if cache is not None:
+        cache.stop_eviction_thread(timeout)
 
 
 __all__ = ["BufferCache", "StrongEntry", "TempRef", "get_buffer_cache"]
