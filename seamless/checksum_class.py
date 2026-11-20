@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 from seamless import CacheMissError, is_worker
 
 
+_fingertip_path = contextvars.ContextVar("fingertip_path", default=frozenset())
+
+
 def _run_coro_in_new_loop(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -417,8 +420,33 @@ class Checksum:
         self, celltype=None, *, _force_producer=False, _require_folder_members=False
     ):
         """Resolve locally, or report the highest failure encountered in recovery."""
-        from seamless import FingertipCategory as Category, is_worker
+        from seamless import FingertipCategory
         from seamless.diagnostics import record
+
+        record("fingertip", self, celltype)
+        if not _force_producer:
+            try:
+                return await self.resolution(celltype)
+            except CacheMissError:
+                pass
+
+        # Parallel candidates inherit the current path, but each extends it
+        # independently. Already-available inputs can still resolve above.
+        path = _fingertip_path.get()
+        if self in path:
+            raise CacheMissError(self, fingertip_category=FingertipCategory.MATERIALIZATION)
+        token = _fingertip_path.set(path | {self})
+        try:
+            return await self._fingertip_from_producers(
+                celltype, _force_producer, _require_folder_members
+            )
+        finally:
+            _fingertip_path.reset(token)
+
+    async def _fingertip_from_producers(
+        self, celltype, _force_producer, _require_folder_members
+    ):
+        from seamless import FingertipCategory as Category
         from seamless.error_envelope import ExecutionCanceledError
         try:
             from aiohttp import ClientError
@@ -427,14 +455,8 @@ class Checksum:
         else:
             infrastructure_errors = (ClientError, TimeoutError)
 
-        record("fingertip", self, celltype)
         category = Category.MATERIALIZATION
         propagate = (ExecutionCanceledError,) + infrastructure_errors
-        if not _force_producer:
-            try:
-                return await self.resolution(celltype)
-            except CacheMissError:
-                pass
 
         try:
             from seamless_transformer.transformation_cache import get_transformation_cache
