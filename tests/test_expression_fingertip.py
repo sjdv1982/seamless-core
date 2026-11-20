@@ -46,6 +46,24 @@ def test_fingertip_recovers_chained_expression_results_recursively():
     assert second_checksum.resolve("str") == "leaf"
 
 
+def test_fingertip_skips_cyclic_expression_candidates():
+    expression_cache = expression_mod.get_expression_cache()
+    expression_cache.clear()
+    value = {"name": "cycle fallback"}
+    source = Buffer({"nested": value}, "plain")
+    source_checksum = source.get_checksum()
+    wanted = Buffer(value, "plain").get_checksum()
+    unavailable = Checksum("b" * 64)
+
+    expression_cache[(wanted.hex(), "", "mixed", "plain")] = wanted
+    expression_cache[(unavailable.hex(), "", "plain", "plain")] = wanted
+    expression_cache[(wanted.hex(), "", "plain", "plain")] = unavailable
+    expression_cache[(source_checksum.hex(), "nested", "plain", "plain")] = wanted
+    _drop_buffer(wanted)
+
+    assert asyncio.run(wanted.fingertip("plain")) == value
+
+
 def test_expression_mismatch_reports_category_without_recording(monkeypatch, caplog):
     import pytest
     from seamless import CacheMissError, FingertipCategory

@@ -269,6 +269,7 @@ async def evaluate_expression_local_async(
     validator_language=None,
     member_id=None,
     materialize=False,
+    force=False,
 ):
     """Share one local evaluator task for each complete Expression identity.
 
@@ -290,7 +291,7 @@ async def evaluate_expression_local_async(
     from .convert import conversion_needs_buffer
 
     cached = _expression_cache.get(key)
-    cached_result = cached is not None and (
+    cached_result = not force and cached is not None and (
         not materialize or _has_local_buffer(cached)
     )
     if not cached_result and not path:
@@ -310,7 +311,8 @@ async def evaluate_expression_local_async(
         needs_buffer = True
     if cached_result or (not path and not needs_buffer):
         return await _evaluate_expression_async(
-            input_checksum, path, input_celltype, celltype, materialize=materialize
+            input_checksum, path, input_celltype, celltype,
+            materialize=materialize, force=force,
         )
     member = object() if member_id is None else member_id
     with _active_expression_lock:
@@ -330,6 +332,7 @@ async def evaluate_expression_local_async(
                         validator=validator,
                         validator_language=validator_language,
                         materialize=materialize,
+                        force=force,
                     )
                 except BaseException as exc:
                     if not active.result_future.done():
@@ -356,7 +359,8 @@ async def evaluate_expression_local_async(
         # The joined evaluation was dispatched, so its buffer is not here.
         # A materializing caller evaluates here, without joining again.
         return await _evaluate_expression_async(
-            input_checksum, path, input_celltype, celltype, materialize=True
+            input_checksum, path, input_celltype, celltype, materialize=True,
+            force=force,
         )
     return result
 
@@ -375,6 +379,7 @@ async def _evaluate_expression_async(
     validator: Checksum | str | bytes | None = None,
     validator_language: str | None = None,
     materialize: bool = False,
+    force: bool = False,
 ) -> Checksum:
     if validator is not None or validator_language is not None:
         # TODO validators: reject-only gate, excluded from expression identity.
@@ -384,7 +389,7 @@ async def _evaluate_expression_async(
     cache_key = _cache_key(key)
     key.input_checksum.tempref()
     cached = _expression_cache.get(cache_key)
-    if cached is not None and (not materialize or _has_local_buffer(cached)):
+    if not force and cached is not None and (not materialize or _has_local_buffer(cached)):
         _tempref_expression_result(cached)
         return cached
 
