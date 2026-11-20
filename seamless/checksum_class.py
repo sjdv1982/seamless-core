@@ -335,7 +335,87 @@ class Checksum:
 
         get_buffer_cache().mark_scratch(self)
 
-    async def fingertip(self, celltype=None):
+    def _get_local_buffer(self):
+        """Return this checksum's buffer from this process or a local source."""
+        from . import Buffer
+        from seamless.checksum.calculate_checksum import TRIVIAL_CHECKSUMS
+
+        trivial = TRIVIAL_CHECKSUMS.get(self.hex())
+        if trivial is not None:
+            return Buffer(trivial)
+        if not is_worker():
+            from seamless.caching.buffer_cache import get_buffer_cache
+
+            buffer = get_buffer_cache().get(self)
+            if buffer is not None:
+                return buffer
+        from seamless.caching.buffer_source import get_buffer_source
+
+        return get_buffer_source(self)
+
+    def _folder_buffers(self, *, retain=False):
+        """Return the local index and leaf buffers, or None if any are missing."""
+        root_buffer = self._get_local_buffer()
+        if root_buffer is None:
+            return None
+        index = root_buffer.get_value("folder")
+        if index is None:
+            return index, []
+        from .checksum.null import is_null
+
+        leaf_buffers = []
+        for member in index.values():
+            if member is None or is_null(member):
+                continue
+            member = Checksum(member)
+            buffer = member._get_local_buffer()
+            if buffer is None:
+                return None
+            leaf_buffers.append(buffer)
+        if retain:
+            # Fingerprinting a folder is a short-lived local recovery. Keep the
+            # bytes scratch-only long enough for the waiting consumer to read them.
+            root_buffer.tempref()
+            for buffer in leaf_buffers:
+                buffer.tempref()
+        return index, leaf_buffers
+
+    def has_local_buffer(self):
+        """Whether this checksum is available in memory or a local source."""
+        return self._get_local_buffer() is not None
+
+    def has_local_folder_buffers(self):
+        """Whether the folder index and each non-null leaf are locally available."""
+        try:
+            return self._folder_buffers() is not None
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    async def fingertip_folder(self):
+        """Recover this folder's index and any locally unavailable leaves."""
+        if self._get_local_buffer() is None:
+            await self.fingertip("folder")
+        if self._folder_buffers() is not None:
+            return await self.resolution("folder")
+        await self.fingertip(
+            "folder", _force_producer=True, _require_folder_members=True
+        )
+        return await self.resolution("folder")
+
+    def fingertip_folder_sync(self):
+        """Synchronously recover a folder index and its non-null leaves."""
+        coro = self.fingertip_folder()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            return _run_coro_in_new_loop(coro)
+        return _run_coro_in_worker_thread(coro)
+
+    async def fingertip(
+        self, celltype=None, *, _force_producer=False, _require_folder_members=False
+    ):
         """Resolve locally, or report the highest failure encountered in recovery."""
         from seamless import FingertipCategory as Category, is_worker
         from seamless.diagnostics import record
@@ -350,10 +430,11 @@ class Checksum:
         record("fingertip", self, celltype)
         category = Category.MATERIALIZATION
         propagate = (ExecutionCanceledError,) + infrastructure_errors
-        try:
-            return await self.resolution(celltype)
-        except CacheMissError:
-            pass
+        if not _force_producer:
+            try:
+                return await self.resolution(celltype)
+            except CacheMissError:
+                pass
 
         try:
             from seamless_transformer.transformation_cache import get_transformation_cache
@@ -428,7 +509,7 @@ class Checksum:
             try:
                 result = await evaluate_expression_local_async(
                     input_checksum, path, source_celltype, target_celltype,
-                    materialize=True,
+                    materialize=True, force=_force_producer,
                 )
             except propagate:
                 raise
@@ -437,6 +518,8 @@ class Checksum:
                 continue
             if Checksum(result) != self:
                 category = Category.IRREPRODUCIBLE_EXPRESSION
+                continue
+            if _require_folder_members and self._folder_buffers(retain=True) is None:
                 continue
             try:
                 return await self.resolution(celltype)
@@ -487,6 +570,7 @@ class Checksum:
             try:
                 result = await evaluate_celljoin_local_async(
                     spec, materialize=True, buffers=recovered,
+                    force=_force_producer,
                 )
             except propagate:
                 raise
@@ -498,6 +582,8 @@ class Checksum:
                 continue
             if Checksum(result) != self:
                 category = max(category, Category.IRREPRODUCIBLE_EXPRESSION)
+                continue
+            if _require_folder_members and self._folder_buffers(retain=True) is None:
                 continue
             try:
                 return await self.resolution(celltype)
@@ -511,7 +597,8 @@ class Checksum:
             for tf_hex in candidates:
                 try:
                     result = await recompute_from_transformation_checksum(
-                        tf_hex, scratch=True, require_value=True
+                        tf_hex, scratch=True, require_value=True,
+                        force_recompute=_force_producer,
                     )
                 except propagate:
                     raise
@@ -525,6 +612,8 @@ class Checksum:
                     continue
                 if Checksum(result) != self:
                     category = max(category, Category.IRREPRODUCIBLE_TRANSFORMATION)
+                    continue
+                if _require_folder_members and self._folder_buffers(retain=True) is None:
                     continue
                 try:
                     return await self.resolution(celltype)

@@ -325,6 +325,7 @@ async def evaluate_celljoin_local_async(
     member_id=None,
     materialize=False,
     buffers=None,
+    force=False,
 ) -> Checksum:
     """Evaluate one celljoin locally, sharing active work by its identity."""
     import asyncio
@@ -345,7 +346,7 @@ async def evaluate_celljoin_local_async(
 
     key = celljoin_cache_key(spec.checksum, spec.celltype)
     cached = _expression_cache.get(key)
-    if cached is not None and (not materialize or _has_local_buffer(cached)):
+    if not force and cached is not None and (not materialize or _has_local_buffer(cached)):
         _tempref_expression_result(cached)
         return cached
 
