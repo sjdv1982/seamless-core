@@ -18,7 +18,10 @@ _integer_types = (
     np.uint64,
 )
 _unsigned_types = (np.uint8, np.uint16, np.uint32, np.uint64)
-_float_types = (float, np.float16, np.float32, np.float64, np.float128)
+# np.float128 does not exist on macOS arm64, switching to np.longdouble
+_float_types = (float, np.float16, np.float32, np.float64) + tuple(
+    dict.fromkeys(getattr(np, n) for n in ("float128", "longdouble") if hasattr(np, n))
+)
 _array_types = (list, tuple, np.ndarray)
 _string_types = (str, bytes)
 
